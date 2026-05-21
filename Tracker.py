@@ -3,12 +3,15 @@ import re
 import json
 import sv_ttk
 import tkinter as tk
+from tkinter import ttk
 from tkinter import ttk, messagebox, filedialog
 import pandas as pd
 import random
 import winsound
 from vtt import build_vtt_tab
 from minigames import SimTowerApp
+from notes import build_notes_tab
+from notes import build_companions_tab
 from tkinter import ttk, simpledialog, messagebox
 from tkinter import ttk, messagebox
 try:
@@ -103,6 +106,13 @@ COLUMN_LABELS = {
         "Cost": "Cost"
     }
 }
+COIN_VALUES = {
+    "PP": 1000,
+    "GP": 100,
+    "EP": 50,
+    "SP": 10,
+    "CP": 1,
+}
 HIT_DIE_MAP = {
     "Artificer": "d8",
     "Barbarian": "d12",
@@ -127,10 +137,56 @@ CHARACTER_PROFS = {
     "languages": [],
     "saving_throws": []
 }
+ARMOR_BASE = {
+    "Padded": 11, "Leather": 11, "Studded leather": 12,
+    "Hide": 12, "Chain shirt": 13, "Scale mail": 14,
+    "Breastplate": 14, "Half plate": 15,
+    "Ring mail": 14, "Chain mail": 16, "Splint": 17, "Plate": 18,
+    "Shield": 2,
+}
+ARMOR_STYLE = {
+    "Padded": "Light", "Leather": "Light", "Studded leather": "Light",
+    "Hide": "Medium", "Chain shirt": "Medium", "Scale mail": "Medium",
+    "Breastplate": "Medium", "Half plate": "Medium",
+    "Ring mail": "Heavy", "Chain mail": "Heavy", "Splint": "Heavy",
+    "Plate": "Heavy",
+    "Shield": "Off-Hand",
+}
 
+spell_slot_vars = {}
+spell_slot_labels = {}
 
+def calculate_ac(equipped_items):
+    """Calculate AC from equipped armor list."""
+    dex_mod = mods_hive.get("DEX", 0)
 
+    body_armor = None
+    has_shield = False
 
+    for item in equipped_items:
+        style = ARMOR_STYLE.get(item)
+        if style == "Off-Hand":
+            has_shield = True
+        elif style in ("Light", "Medium", "Heavy"):
+            body_armor = item
+
+    if body_armor is None:
+        # Unarmored
+        ac = 10 + dex_mod
+    else:
+        base  = ARMOR_BASE.get(body_armor, 10)
+        style = ARMOR_STYLE.get(body_armor)
+        if style == "Light":
+            ac = base + dex_mod
+        elif style == "Medium":
+            ac = base + min(dex_mod, 2)
+        else:  # Heavy
+            ac = base
+
+    if has_shield:
+        ac += 2
+
+    return ac
 
 def load_excel_data():
     try:
@@ -452,6 +508,8 @@ equipment_lbl = None
 speed_var   = None
 passive_var = None
 levelup_btn = None
+ac_var = None
+weapon_slot_vars = []
 
 # Spell panel refs (set during build)
 spell_class_var  = None
@@ -504,17 +562,170 @@ def add_placeholder(widget, text):
     widget.bind("<FocusOut>", on_focus_out)
 
 
-
-
-
-
 # ---------------------------------------------------------------------------
 # UPDATE FUNCTIONS
 # ---------------------------------------------------------------------------
+def recalc_weapon_slot(slot):
+    """Calculate to hit, damage and type for a weapon slot."""
+    weapon_name = slot["weapon"].get()
+    if not weapon_name or weapon_name == "—":
+        slot["to_hit"].set("—")
+        slot["damage"].set("—")
+        slot["type"].set("—")
+        return
+
+    # Look up weapon in SHEET_WEAPONS
+    df = ITEM_SHEETS.get("weapons")
+    if df is None or df.empty:
+        return
+
+    name_col = df.columns[0]
+    match = df[df[name_col].astype(str).str.strip() == weapon_name]
+    if match.empty:
+        return
+
+    row = match.iloc[0]
+
+    # Pull weapon data
+    damage_die  = str(row.get("Damage", "1d4") or "1d4").strip()
+    damage_type = str(row.get("Damage_Type", "—") or "—").strip().capitalize()
+    properties  = str(row.get("Properties", "") or "").lower()
+    range_type  = str(row.get("Melee or Ranged", "Melee") or "Melee").strip()
+
+    is_finesse = "finesse" in properties
+    is_ranged  = range_type.lower() == "ranged"
+
+    # Determine which mod to use
+    str_mod = mods_hive.get("STR", 0)
+    dex_mod = mods_hive.get("DEX", 0)
+
+    if is_finesse:
+        stat_mod = max(str_mod, dex_mod)
+    elif is_ranged:
+        stat_mod = dex_mod
+    else:
+        stat_mod = str_mod
+
+    # Proficiency check
+    prof_bonus = 0
+    try:
+        lvl1 = int(class1_level_var.get() or 0)
+        lvl2 = int(class2_level_var.get() or 0)
+        total_lvl = max(1, lvl1 + lvl2)
+        base_prof = get_proficiency_bonus(total_lvl)
+
+        # Check if character is proficient with this weapon
+        if is_proficient_with_weapon(weapon_name, properties):
+            prof_bonus = base_prof
+    except:
+        pass
+
+    # Bonus (fighting style, magic weapon etc)
+    try:
+        bonus = int(slot["bonus"].get() or 0)
+    except:
+        bonus = 0
+
+    # Calculate
+    to_hit_total = stat_mod + prof_bonus + bonus
+    sign         = "+" if to_hit_total >= 0 else ""
+
+    # Damage string — e.g. "1d6+3"
+    dmg_mod = stat_mod + bonus
+    if dmg_mod >= 0:
+        dmg_str = f"{damage_die}+{dmg_mod}"
+    elif dmg_mod < 0:
+        dmg_str = f"{damage_die}{dmg_mod}"
+    else:
+        dmg_str = damage_die
+
+    slot["to_hit"].set(f"{sign}{to_hit_total}")
+    slot["damage"].set(dmg_str)
+    slot["type"].set(damage_type)
+
+
+def is_proficient_with_weapon(weapon_name, properties):
+    """Check if current class grants proficiency with this weapon."""
+    df = ITEM_SHEETS.get("weapons")
+    if df is None or df.empty:
+        return False
+
+    # Get weapon category (Simple or Martial)
+    name_col = df.columns[0]
+    match = df[df[name_col].astype(str).str.strip() == weapon_name]
+    if match.empty:
+        return False
+
+    row      = match.iloc[0]
+    category = str(row.get("Simple or Martial", "") or "").strip().lower()
+
+    # Get class proficiencies
+    prof_df  = None
+    try:
+        xl       = pd.ExcelFile(DATA_FILE)
+        prof_df  = pd.read_excel(xl, sheet_name="SHEETS_PROF")
+        prof_df.columns = [c.strip() for c in prof_df.columns]
+    except:
+        return False
+
+    cls1 = class1_var.get()
+    cls2 = class2_var.get()
+
+    for cls in [cls1, cls2]:
+        if not cls:
+            continue
+        rows = prof_df[prof_df["Class"] == cls]
+        if rows.empty:
+            continue
+        raw = str(rows.iloc[0].get("Weapons_Pro", "") or "").lower()
+
+        # Check broad tags first
+        if "simple" in raw and category == "simple":
+            return True
+        if "martial" in raw and category == "martial":
+            return True
+        # Check specific weapon name
+        if weapon_name.lower() in raw:
+            return True
+
+    return False
+
+
+def recalc_all_weapon_slots():
+    """Recalculate all weapon slots — called when stats or level change."""
+    for slot in weapon_slot_vars:
+        recalc_weapon_slot(slot)
+
+
+def refresh_weapon_dropdowns():
+    """Update weapon dropdowns to show currently equipped weapons."""
+    if not weapon_slot_vars:
+        return
+    try:
+        equipped = list(equipped_listbox.get(0, tk.END))
+    except:
+        equipped = []
+
+    # Filter to weapons only
+    weapon_df   = ITEM_SHEETS.get("weapons", pd.DataFrame())
+    weapon_names = set()
+    if not weapon_df.empty:
+        weapon_names = set(weapon_df.iloc[:, 0].astype(str).str.strip().tolist())
+
+    equipped_weapons = ["—"] + [e for e in equipped if e in weapon_names]
+
+    for slot in weapon_slot_vars:
+        cb_val = slot["weapon"].get()
+        slot["cb"].config(values=equipped_weapons)
+        if cb_val not in equipped_weapons:
+            slot["weapon"].set("—")
+            recalc_weapon_slot(slot)
 
 def update_all_skills(*_):
     try:
-        prof = get_proficiency_bonus(level_var.get())
+        lvl1 = int(class1_level_var.get() or 0)
+        lvl2 = int(class2_level_var.get() or 0)
+        prof = get_proficiency_bonus(max(1, lvl1 + lvl2))
     except Exception:
         prof = 2
     for label, stat, var in skill_labels:
@@ -555,7 +766,6 @@ def update_all_skills(*_):
             passive_var.set(str(10 + wis_mod + perc_prof))
         except:
             pass
-
 def on_stat_change(stat, *_):
     try:
         mod = calculate_modifier(sb_vars[stat].get())
@@ -566,6 +776,16 @@ def on_stat_change(stat, *_):
         mod_display_labels[stat].config(text=f"({fmt_mod(mod)})")
     update_all_skills()
 
+    # Recalc AC if DEX changed and armor is equipped
+    if stat == "DEX" and ac_var is not None:
+        try:
+            # Need equipped_items — stored locally in build_inventory_tab
+            # so we trigger via the global listbox
+            items = list(equipped_listbox.get(0, tk.END))
+            ac_var.set(str(calculate_ac(items)))
+        except:
+            pass
+    recalc_all_weapon_slots()
 def get_character_data():
 
     try:
@@ -1582,24 +1802,48 @@ def open_character_wizard(parent, excel_path, class_info, subclass_map,
             con = int(wiz["scores"]["CON"].get())
         except:
             con = 10
+        con_racial = 0
+        if wiz.get("race_row") is not None:
+            try:
+                con_racial += int(wiz["race_row"].get("Con", 0) or 0)
+            except:
+                pass
+        if wiz.get("race_sub_row") is not None:
+            try:
+                con_racial += int(wiz["race_sub_row"].get("Con", 0) or 0)
+            except:
+                pass
         con_mod = (con - 10) // 2
         avg     = (hd_max // 2) + 1
         return max(1, (hd_max + con_mod) + (lvl - 1) * (avg + con_mod))
 
     def _clean(row, col, fallback):
-        """Safely read a value from a pandas row, handling NaN and blanks."""
-        if row is None:
-            return fallback
-        val = row.get(col, fallback)
-        if val is None or (isinstance(val, float) and __import__('math').isnan(val)):
-            # Try subrace row as fallback
-            sub = wiz.get("race_sub_row")
-            if sub is not None:
-                val = sub.get(col, fallback)
-            if val is None or (isinstance(val, float) and __import__('math').isnan(val)):
-                return fallback
-        result = str(val).strip()
-        return result if result and result.lower() != "nan" else fallback
+        """Read value — subrace takes priority over base race row."""
+        import math
+
+        def is_empty(val):
+            if val is None:
+                return True
+            if isinstance(val, float) and math.isnan(val):
+                return True
+            if str(val).strip().lower() in ("", "nan"):
+                return True
+            return False
+
+        # Check subrace first
+        sub = wiz.get("race_sub_row")
+        if sub is not None:
+            val = sub.get(col, None)
+            if not is_empty(val):
+                return str(val).strip()
+
+        # Fall back to base race row
+        if row is not None:
+            val = row.get(col, None)
+            if not is_empty(val):
+                return str(val).strip()
+
+        return fallback
 
     def finish():
         race_row = wiz.get("race_row")
@@ -2286,8 +2530,7 @@ def build_save_load(parent):
     prof_text.config(state="disabled")
 
 def build_combat_hud(parent):
-    global initiative_label
-    global speed_var, passive_var
+    global ac_var, speed_var, passive_var, initiative_label
     frame = ttk.LabelFrame(parent, text=" Combat & Actions ")
     frame.pack(side="left", fill="both", expand=False, padx=5)
 
@@ -2304,7 +2547,7 @@ def build_combat_hud(parent):
                  font=("Arial",13,"bold"), justify="center").pack(padx=4, pady=2)
         return var
 
-    editable_bubble(top, "AC", "10")
+
 
     init_b = tk.Frame(top, relief="groove", bd=1)
     init_b.pack(side="left", padx=8)
@@ -2312,7 +2555,8 @@ def build_combat_hud(parent):
     initiative_label = tk.Label(init_b, text="+0",
                                  font=("Arial",13,"bold"), fg="blue", width=4)
     initiative_label.pack(padx=4, pady=2)
-
+    
+    ac_var      = editable_bubble(top, "AC", "10")
     speed_var   = editable_bubble(top, "Speed (ft)", "30")
     passive_var = editable_bubble(top, "Passive Perc.", "10")
 
@@ -2332,6 +2576,9 @@ def build_combat_hud(parent):
         tk.Label(cell, text=lbl, font=("Arial",8)).pack()
         tk.Entry(cell, textvariable=hp_vars[key], width=6,
                  font=("Arial",13,"bold"), justify="center", fg=fg).pack()
+
+
+
 # -------------------------
 # HIT DICE
 # -------------------------
@@ -2391,16 +2638,179 @@ def build_combat_hud(parent):
     tk.Button(btn_row, text="Apply+", bg="#27ae60", fg="white",
               command=lambda: apply_amt(1)).pack(side="left", padx=2)
 
-    # Weapon slots
+# Weapon slots
     wp_frame = ttk.LabelFrame(frame, text=" Weapon / Attack Slots ")
     wp_frame.pack(fill="x", padx=6, pady=6)
-    for col,(hdr,w) in enumerate([("Weapon",14),("To Hit",7),("Damage",8),("Type",8)]):
-        tk.Label(wp_frame, text=hdr, font=("Arial",8,"bold"),
+
+    headers = [("Weapon", 14), ("To Hit", 7), ("Damage", 8),
+               ("Type", 10), ("Bonus", 5)]
+    for col, (hdr, w) in enumerate(headers):
+        tk.Label(wp_frame, text=hdr, font=("Arial", 8, "bold"),
                  width=w, anchor="center").grid(row=0, column=col, padx=3, pady=2)
-    for r in range(1,4):
-        for col,w in enumerate([14,7,8,8]):
-            tk.Entry(wp_frame, width=w, justify="center").grid(
-                row=r, column=col, padx=3, pady=2)
+
+    weapon_slot_vars.clear()
+    for r in range(1, 4):
+        slot = {
+            "weapon":  tk.StringVar(value="—"),
+            "to_hit":  tk.StringVar(value="—"),
+            "damage":  tk.StringVar(value="—"),
+            "type":    tk.StringVar(value="—"),
+            "bonus":   tk.StringVar(value="0"),
+        }
+        weapon_slot_vars.append(slot)
+
+        # Weapon dropdown
+        cb = ttk.Combobox(wp_frame, textvariable=slot["weapon"],
+                          values=["—"], state="readonly", width=13)
+        cb.grid(row=r, column=0, padx=3, pady=2)
+        slot["cb"] = cb
+        # To Hit / Damage / Type — read only display
+        for col_i, key in enumerate(["to_hit", "damage", "type"], start=1):
+            widths = [7, 8, 10]
+            tk.Entry(wp_frame, textvariable=slot[key],
+                     width=widths[col_i - 1], justify="center",
+                     state="readonly",
+                     readonlybackground="#2c3e50",
+                     fg="white",
+                     font=("Arial", 9, "bold")).grid(row=r, column=col_i,
+                                                      padx=3, pady=2)
+
+        # Bonus — manually editable, triggers recalc
+        bonus_entry = tk.Entry(wp_frame, textvariable=slot["bonus"],
+                               width=5, justify="center")
+        bonus_entry.grid(row=r, column=4, padx=3, pady=2)
+
+        # Bind weapon selection and bonus change
+        def on_weapon_select(event=None, s=slot):
+            recalc_weapon_slot(s)
+
+        def on_bonus_change(*_, s=slot):
+            recalc_weapon_slot(s)
+
+        cb.bind("<<ComboboxSelected>>", on_weapon_select)
+        slot["bonus"].trace_add("write", on_bonus_change)
+
+    # ---------------------------
+    # SPELL SLOTS
+    # ---------------------------
+
+    spell_frame = ttk.LabelFrame(frame, text=" Spellcasting ")
+    spell_frame.pack(fill="x", padx=6, pady=6)
+
+    slots_container = tk.Frame(spell_frame)
+    slots_container.pack()
+
+    left_col = tk.Frame(slots_container)
+    left_col.pack(side="left", padx=20)
+
+    right_col = tk.Frame(slots_container)
+    right_col.pack(side="left", padx=20)
+
+    # LEFT SIDE (1–4)
+    for level in range(1, 5):
+
+        row = tk.Frame(left_col)
+        row.pack(anchor="w", pady=2)
+
+        tk.Label(
+            row,
+            text=str(level),
+            width=2,
+            font=("Arial", 10, "bold")
+        ).pack(side="left")
+
+        spell_slot_vars[level] = [True] * 4
+        spell_slot_labels[level] = []
+
+        for i in range(4):
+
+            lbl = tk.Label(
+                row,
+                text="★",
+                font=("Arial", 14),
+                fg="cyan",
+                cursor="hand2"
+            )
+
+            lbl.pack(side="left", padx=1)
+
+            lbl.bind(
+                "<Button-1>",
+                lambda e, l=level, idx=i:
+                    toggle_spell_slot(l, idx)
+            )
+
+            spell_slot_labels[level].append(lbl)
+
+    # RIGHT SIDE (5–8)
+    for level in range(5, 9):
+
+        row = tk.Frame(right_col)
+        row.pack(anchor="w", pady=2)
+
+        tk.Label(
+            row,
+            text=str(level),
+            width=2,
+            font=("Arial", 10, "bold")
+        ).pack(side="left")
+
+        spell_slot_vars[level] = [True] * 4
+        spell_slot_labels[level] = []
+
+        for i in range(4):
+
+            lbl = tk.Label(
+                row,
+                text="★",
+                font=("Arial", 14),
+                fg="cyan",
+                cursor="hand2"
+            )
+
+            lbl.pack(side="left", padx=1)
+
+            lbl.bind(
+                "<Button-1>",
+                lambda e, l=level, idx=i:
+                    toggle_spell_slot(l, idx)
+            )
+
+            spell_slot_labels[level].append(lbl)
+
+    # LEVEL 9 CENTERED
+    row9 = tk.Frame(spell_frame)
+    row9.pack(pady=(6, 2))
+
+    tk.Label(
+        row9,
+        text="9",
+        width=2,
+        font=("Arial", 10, "bold")
+    ).pack(side="left")
+
+    spell_slot_vars[9] = [True] * 4
+    spell_slot_labels[9] = []
+
+    for i in range(4):
+
+        lbl = tk.Label(
+            row9,
+            text="★",
+            font=("Arial", 14),
+            fg="cyan",
+            cursor="hand2"
+        )
+
+        lbl.pack(side="left", padx=1)
+
+        lbl.bind(
+            "<Button-1>",
+            lambda e, l=9, idx=i:
+                toggle_spell_slot(l, idx)
+        )
+
+        spell_slot_labels[9].append(lbl)
 
 def build_skills(parent):
     global prof_info_label, save_prof_vars, save_labels
@@ -2444,8 +2854,13 @@ def build_skills(parent):
         save_frame.pack(side="left", padx=6)
         save_prof = tk.BooleanVar()
         save_prof_vars[stat] = save_prof
-        tk.Checkbutton(save_frame, variable=save_prof,
-                       command=update_all_skills).pack(side="left")
+        save_cb = ttk.Checkbutton(
+            save_frame,
+            variable=save_prof,
+            command=update_all_skills
+        )
+
+        save_cb.pack(side="left", padx=2)
         save_lbl = tk.Label(save_frame, text="Save +0",
                              fg="darkred", font=("Arial", 10, "bold"))
         save_lbl.pack(side="left")
@@ -2463,8 +2878,12 @@ def build_skills(parent):
                 tk._skill_name_map = {}
             tk._skill_name_map[skill] = prof_var
 
-            tk.Checkbutton(row, variable=prof_var,
-                           command=update_all_skills).pack(side="left")
+            cb = ttk.Checkbutton(
+                row,
+                variable=prof_var,
+                command=update_all_skills
+            )
+            cb.pack(side="left", padx=2)
 
             btn = tk.Button(row, text=skill, anchor="w",
                             relief="flat", font=("Arial", 8))
@@ -2528,6 +2947,29 @@ def roll_skill(stat, prof_var, mode):
     if roll == 20: tray_label.config(fg="green")
     elif roll == 1: tray_label.config(fg="red")
     else: tray_label.config(fg="#2c3e50")
+
+
+def toggle_spell_slot(level, index):
+
+    slots = spell_slot_vars[level]
+
+    slots[index] = not slots[index]
+
+    refresh_spell_slots()
+def refresh_spell_slots():
+
+    for level, labels in spell_slot_labels.items():
+
+        slots = spell_slot_vars[level]
+
+        for i, lbl in enumerate(labels):
+
+            if slots[i]:
+                lbl.config(text="★", fg="cyan")
+            else:
+                lbl.config(text="☆", fg="red")
+
+
 
 # ---------------------------------------------------------------------------
 # BUILD001: SPELL LOOKUP PANEL
@@ -2914,7 +3356,6 @@ def build_item_browser(parent, on_add_callback):
             for _, row in df.iterrows():
                 name = str(row[name_col])
 
-
 def build_inventory_tab(parent):
     global backpack_listbox, equipped_listbox, item_listbox, item_type_var, item_desc_text
     backpack_items = []
@@ -3008,25 +3449,105 @@ def build_inventory_tab(parent):
     # ---------------------------
 
     def add_to_backpack(event=None):
+
         sel = item_listbox.curselection()
+
         if not sel:
             return
 
         item_name = item_listbox.get(sel[0])
+
+        category = item_type_var.get()
+        df = ITEM_SHEETS.get(category)
+
+        if df is None or df.empty:
+            return
+
+        name_col = df.columns[0]
+
+        match = df[df[name_col] == item_name]
+
+        if match.empty:
+            return
+
+        row = match.iloc[0]
+
+        # -------------------------
+        # GET COST
+        # -------------------------
+
+        cost_text = row.get("Cost", "0 gp")
+
+        item_cost_cp = parse_cost(cost_text)
+
+        current_money_cp = wallet_to_cp()
+
+        # -------------------------
+        # CHECK FUNDS
+        # -------------------------
+
+        if current_money_cp < item_cost_cp:
+
+            messagebox.showwarning(
+                "Not Enough Money",
+                f"You cannot afford {item_name}.\n\nCost: {cost_text}"
+            )
+
+            return
+
+        # -------------------------
+        # PURCHASE
+        # -------------------------
+
+        new_total = current_money_cp - item_cost_cp
+
+        set_wallet_from_cp(new_total)
+
         backpack_items.append(item_name)
+
         refresh_backpack()
+
+    def get_equipped_armor_style(name):
+        return ARMOR_STYLE.get(name)
+
+    def recalc_ac():
+        if ac_var is not None:
+            ac_var.set(str(calculate_ac(equipped_items)))
 
     def equip_item(event=None):
         sel = backpack_listbox.curselection()
         if not sel:
             return
 
-        item = backpack_items.pop(sel[0])
-        equipped_items.append(item)
+        item = backpack_items[sel[0]]
+        style = ARMOR_STYLE.get(item)
 
+        # Auto-swap body armor
+        if style in ("Light", "Medium", "Heavy"):
+            current_body = [
+                e for e in equipped_items
+                if ARMOR_STYLE.get(e) in ("Light", "Medium", "Heavy")
+            ]
+            for old in current_body:
+                equipped_items.remove(old)
+                backpack_items.append(old)
+
+        # Auto-swap off-hand
+        elif style == "Off-Hand":
+            current_offhand = [
+                e for e in equipped_items
+                if ARMOR_STYLE.get(e) == "Off-Hand"
+            ]
+            for old in current_offhand:
+                equipped_items.remove(old)
+                backpack_items.append(old)
+
+        backpack_items.pop(sel[0])
+        equipped_items.append(item)
         refresh_backpack()
         refresh_equipped()
-
+        recalc_ac()
+        refresh_weapon_dropdowns()
     def unequip_item(event=None):
         sel = equipped_listbox.curselection()
         if not sel:
@@ -3034,9 +3555,10 @@ def build_inventory_tab(parent):
 
         item = equipped_items.pop(sel[0])
         backpack_items.append(item)
-
         refresh_backpack()
         refresh_equipped()
+        recalc_ac()
+        refresh_weapon_dropdowns()
     def remove_from_backpack(event=None):
         sel = backpack_listbox.curselection()
         if not sel:
@@ -3110,6 +3632,143 @@ def build_inventory_tab(parent):
     refresh_shop()
     refresh_backpack()
     refresh_equipped()
+    build_wallet(right_col)
+def build_wallet(parent):
+
+    wallet_frame = ttk.LabelFrame(parent, text=" Wallet ")
+    wallet_frame.pack(fill="x", padx=6, pady=6)
+
+    # -------------------------
+    # TOP ROW - CURRENT MONEY
+    # -------------------------
+
+    top = tk.Frame(wallet_frame)
+    top.pack(fill="x", pady=4)
+
+    for coin in ["PP", "GP", "EP", "SP", "CP"]:
+
+        cell = tk.Frame(top)
+        cell.pack(side="left", padx=6)
+
+        tk.Label(
+            cell,
+            text=coin,
+            font=("Arial", 8, "bold")
+        ).pack()
+
+        tk.Entry(
+            cell,
+            textvariable=wallet_vars[coin],
+            width=6,
+            justify="center",
+            font=("Arial", 11, "bold")
+        ).pack()
+
+    # -------------------------
+    # BOTTOM ROW - MODIFY MONEY
+    # -------------------------
+
+    controls = tk.Frame(wallet_frame)
+    controls.pack(fill="x", pady=6)
+
+    amount_var = tk.IntVar(value=0)
+    coin_var = tk.StringVar(value="GP")
+
+    tk.Entry(
+        controls,
+        textvariable=amount_var,
+        width=8,
+        justify="center"
+    ).pack(side="left", padx=4)
+
+    ttk.Combobox(
+        controls,
+        textvariable=coin_var,
+        values=["PP", "GP", "EP", "SP", "CP"],
+        width=4,
+        state="readonly"
+    ).pack(side="left", padx=4)
+
+    def modify_money(delta):
+        try:
+            current = wallet_vars[coin_var.get()].get()
+            amount = amount_var.get()
+
+            new_total = max(0, current + (amount * delta))
+
+            wallet_vars[coin_var.get()].set(new_total)
+
+        except:
+            pass
+
+    tk.Button(
+        controls,
+        text="+",
+        bg="#27ae60",
+        fg="white",
+        command=lambda: modify_money(1)
+    ).pack(side="left", padx=4)
+
+    tk.Button(
+        controls,
+        text="-",
+        bg="#c0392b",
+        fg="white",
+        command=lambda: modify_money(-1)
+    ).pack(side="left", padx=4)
+def wallet_to_cp():
+
+    total = 0
+
+    for coin, var in wallet_vars.items():
+        total += var.get() * COIN_VALUES[coin]
+
+    return total
+def set_wallet_from_cp(total_cp):
+
+    total_cp = max(0, total_cp)
+
+    pp = total_cp // 1000
+    total_cp %= 1000
+
+    gp = total_cp // 100
+    total_cp %= 100
+
+    ep = total_cp // 50
+    total_cp %= 50
+
+    sp = total_cp // 10
+    total_cp %= 10
+
+    cp = total_cp
+
+    wallet_vars["PP"].set(pp)
+    wallet_vars["GP"].set(gp)
+    wallet_vars["EP"].set(ep)
+    wallet_vars["SP"].set(sp)
+    wallet_vars["CP"].set(cp)
+def parse_cost(cost_text):
+
+    if pd.isna(cost_text):
+        return 0
+
+    text = str(cost_text).strip().lower()
+
+    if text in ["—", "-", ""]:
+        return 0
+
+    try:
+        parts = text.split()
+
+        amount = float(parts[0])
+        coin = parts[1].upper()
+
+        return int(amount * COIN_VALUES[coin])
+
+    except:
+        return 0
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -3234,7 +3893,7 @@ global advantage_var
 advantage_var = tk.IntVar(value=0)
 root.title("JD&D Tracker")
 mode_var = tk.StringVar(root, value="PLAYER")
-root.geometry("1000x900")
+root.geometry("1050x900")
 #root.state("zoomed")
 root.resizable(True, True)
 #root.minsize(900, 700)
@@ -3281,20 +3940,14 @@ def on_wizard_complete(result):
     # --- Identity ---
     name_entry.delete(0, tk.END)
     name_entry.insert(0, result["name"])
-
     sex_entry.delete(0, tk.END)
     sex_entry.insert(0, result["sex"])
 
-    # --- Race / Background / Class dropdowns ---
+    # --- Dropdowns ---
     race_var.set(result["race"])
     background_var.set(result["background"])
-
-    if speed_var is not None:
-            speed_var.set(result.get("speed", "30"))
-
     class1_var.set(result["class_name"])
     class1_level_var.set(result["level"])
-
     subs = SUBCLASS_MAP.get(result["class_name"], [])
     subclass1_box.config(values=subs)
     subclass1_var.set(result["subclass"])
@@ -3304,75 +3957,81 @@ def on_wizard_complete(result):
         if stat in sb_vars:
             sb_vars[stat].set(str(val))
 
+    # --- Speed ---
+    if speed_var is not None:
+        speed_var.set(result.get("speed", "30"))
+
+    # --- HP ---
+    max_hp = result.get("max_hp", 10)
+    try:
+        hp_vars["max"].set(str(max_hp))
+        hp_vars["cur"].set(str(max_hp))
+        hp_vars["tmp"].set("0")
+    except Exception as e:
+        print(f"HP apply error: {e}")
+
     # --- Saving throw proficiencies ---
-    saving_throws_raw = result.get("saving_throws", "")
     st_map = {
-        "strength":"STR", "str":"STR",
-        "dexterity":"DEX", "dex":"DEX",
-        "constitution":"CON", "con":"CON",
-        "intelligence":"INT", "int":"INT",
-        "wisdom":"WIS", "wis":"WIS",
-        "charisma":"CHA", "cha":"CHA",
+        "strength":"STR","str":"STR",
+        "dexterity":"DEX","dex":"DEX",
+        "constitution":"CON","con":"CON",
+        "intelligence":"INT","int":"INT",
+        "wisdom":"WIS","wis":"WIS",
+        "charisma":"CHA","cha":"CHA",
     }
-    for token in saving_throws_raw.replace(",", " ").split():
-        key = token.strip().lower()
-        stat = st_map.get(key)
+    # Clear existing first
+    for var in save_prof_vars.values():
+        var.set(False)
+    for token in result.get("saving_throws","").replace(","," ").split():
+        stat = st_map.get(token.strip().lower())
         if stat and stat in save_prof_vars:
             save_prof_vars[stat].set(True)
 
     # --- Skill proficiencies ---
-    all_profs = result.get("all_skill_profs", [])
-    for lbl, stat, prof_var in skill_labels:
-        skill_name = lbl.cget("text") if hasattr(lbl, "cget") else ""
-        # skill_labels stores (lbl, stat, prof_var)
-        # we need the button text not the +0 label
-        # check via the skill name stored at creation
-        pass  # handled below
-    for skill in all_profs:
-        for (lbl, stat, prof_var) in skill_labels:
-            # We'll match via the label widget's associated skill name
-            # stored in a new dict — see note below
-            pass
     if hasattr(tk, "_skill_name_map"):
-        for skill in all_profs:
+        for skill in result.get("all_skill_profs", []):
             if skill in tk._skill_name_map:
                 tk._skill_name_map[skill].set(True)
 
-# --- Proficiency & Training block ---
+    # --- Proficiency & Training block ---
     try:
         prof_content = (
-            f"Armor:\n{result.get('armor_pro', '—') or '—'}\n\n"
-            f"Weapons:\n{result.get('weapon_pro', '—') or '—'}\n\n"
-            f"Tools:\n{result.get('tool_pro', '—') or '—'}\n\n"
-            f"Languages:\n{result.get('race_languages', '—') or '—'}\n\n"
-            f"Saving Throws:\n{result.get('saving_throws', '—') or '—'}\n\n"
+            f"Armor:\n{result.get('armor_pro','—') or '—'}\n\n"
+            f"Weapons:\n{result.get('weapon_pro','—') or '—'}\n\n"
+            f"Tools:\n{result.get('tool_pro','—') or '—'}\n\n"
+            f"Languages:\n{result.get('race_languages','—') or '—'}\n\n"
+            f"Saving Throws:\n{result.get('saving_throws','—') or '—'}\n\n"
             f"Senses:\n—\n\n"
-            f"Other:\n{result.get('racial_bonus', '—') or '—'}\n"
+            f"Other:\n{result.get('racial_bonus','—') or '—'}\n"
         )
         prof_text.config(state="normal")
         prof_text.delete("1.0", tk.END)
         prof_text.insert("1.0", prof_content)
         prof_text.config(state="disabled")
     except Exception as e:
-        print(f"prof_text update error: {e}")
+        print(f"prof_text error: {e}")
 
-    # --- Background tab labels ---
-    skills_lbl.config(
-        text=f"Skills: {', '.join(result['bg_skills']) or '—'}"
-    )
-    languages_lbl.config(
-        text=f"Languages: {result.get('bg_languages','—')}"
-    )
-    equipment_lbl.config(
-        text=f"Equipment: {result.get('bg_equipment','—')}"
-    )
+    # --- Background tab ---
+    if skills_lbl is not None:
+        skills_lbl.config(
+            text=f"Skills: {', '.join(result['bg_skills']) or '—'}"
+        )
+    if languages_lbl is not None:
+        languages_lbl.config(
+            text=f"Languages: {result.get('bg_languages','—')}"
+        )
+    if equipment_lbl is not None:
+        equipment_lbl.config(
+            text=f"Equipment: {result.get('bg_equipment','—')}"
+        )
 
-    # --- Refresh everything ---
+    # --- Refresh all UI ---
     for stat in sb_vars:
         on_stat_change(stat)
     refresh_feats()
-    refresh_spells()
     update_all_skills()
+    refresh_spells()
+    update_hit_dice()
 
     messagebox.showinfo("Character Created",
         f"✨ {result['name']} is ready for adventure!")
@@ -3393,8 +4052,13 @@ tk.Button(top_bar, text="✨ New Character",
           bg="#8e44ad", fg="white",
           font=("Arial", 9, "bold")).pack(side="left", padx=6)
 
-
-
+wallet_vars = {
+    "PP": tk.IntVar(value=0),
+    "GP": tk.IntVar(value=0),
+    "EP": tk.IntVar(value=0),
+    "SP": tk.IntVar(value=0),
+    "CP": tk.IntVar(value=0),
+}
 
 # FRAMES
 sheet_outer = tk.Frame(notebook)
@@ -3457,7 +4121,7 @@ notebook.add(feats_tab,  text="Class Feats")
 notebook.add(background_tab,  text="Background")
 #notebook.add(items_tab,  text="Items")
 notebook.add(notes_tab, text="Notes")
-notebook.add(pets_tab, text="Pets")
+notebook.add(pets_tab, text="Companions")
 notebook.add(hb_tab, text="Homebrew")
 
 
@@ -3465,10 +4129,10 @@ notebook.add(hb_tab, text="Homebrew")
 simtower = SimTowerApp(hb_tab)
 build_spell_panel(spells_tab)
 build_inventory_tab(inventory_tab)
-build_background_tab(background_tab)
 
-#build_items_tab(items_tab)
-#build_pet_panel(pets_frame)
+build_background_tab(background_tab)
+build_notes_tab(notes_tab, lambda: name_entry.get())
+build_companions_tab(pets_tab)
 
 #
 ##CHARACTER
@@ -3482,8 +4146,6 @@ mid = tk.Frame(sheet_tab)
 mid.pack(fill="x", padx=10, pady=5)
 #build_utility(mid)
 build_combat_hud(mid)
-
-
 
 def build_dice_tray(parent):
     global tray_label, tray_history
