@@ -2548,23 +2548,12 @@ def update_spell_slots():
 
     slots = get_spell_slots()
 
-    for level in range(1, 10):
+    for lvl in range(1, 10):
 
-        max_slots = slots.get(level, 0)
+        value = slots.get(lvl, 0)
 
-        if level not in spell_slot_vars:
-            continue
-
-        current_slots = spell_slot_vars[level]
-
-        # Resize slot list to match actual max slots
-        while len(current_slots) < max_slots:
-            current_slots.append(True)
-
-        while len(current_slots) > max_slots:
-            current_slots.pop()
-
-    refresh_spell_slots()
+        if lvl in spell_slot_vars:
+            spell_slot_vars[lvl].set(value)
 
 
 
@@ -3222,10 +3211,6 @@ def toggle_spell_slot(level, index):
 
     slots = spell_slot_vars[level]
 
-    # Ignore clicks beyond current slot count
-    if index >= len(slots):
-        return
-
     slots[index] = not slots[index]
 
     refresh_spell_slots()
@@ -3237,17 +3222,10 @@ def refresh_spell_slots():
 
         for i, lbl in enumerate(labels):
 
-            # Hide unused slot stars
-            if i >= len(slots):
-
-                lbl.config(text=" ", fg="gray")
-
+            if slots[i]:
+                lbl.config(text="★", fg="cyan")
             else:
-
-                if slots[i]:
-                    lbl.config(text="★", fg="cyan")
-                else:
-                    lbl.config(text="☆", fg="red")
+                lbl.config(text="☆", fg="red")
 
 
 
@@ -3358,9 +3336,6 @@ def show_spell_detail(event=None):
 def build_spell_panel(parent):
     global spell_class_var, spell_level_var, spell_search_var, spell_listbox, count_label, known_listbox, equip_listbox, diagram_canvas
 
-    top_bar = tk.Frame(parent)
-    top_bar.pack(fill="x", padx=6, pady=4)
-
     main_row = tk.Frame(parent)
     main_row.pack(fill="both", expand=True)
     
@@ -3391,7 +3366,7 @@ def build_spell_panel(parent):
     diagram_canvas.pack(fill="both", expand=True)
 
 
-    bar = top_bar
+    bar = tk.Frame(main_row)
     bar.pack(fill="x", padx=6, pady=4)
 
     tk.Label(bar, text="Class:").pack(side="left")
@@ -3432,7 +3407,6 @@ def build_spell_panel(parent):
     spell_listbox.bind("<Button-2>", show_spell_detail)
     spell_listbox.bind("<Return>",          show_spell_detail)
 
-    build_spell_slot_panel(diagram_col)
     refresh_spells()
     def add_to_known(event=None):
         sel = spell_listbox.curselection()
@@ -4415,11 +4389,123 @@ simtower = SimTowerApp(hb_tab)
 def build_spell_slot_panel(parent):
 
     global spell_slot_vars
-    spell_frame = ttk.LabelFrame(parent, text=" Spellcasting ")
-    spell_frame.pack(fill="x", padx=6, pady=6)
 
-    build_spell_slot_panel(spell_frame)
-refresh_spells()
+    frame = ttk.LabelFrame(parent, text=" Spell Slots ")
+    frame.pack(fill="x", padx=6, pady=6)
+
+    left_col = tk.Frame(frame)
+    right_col = tk.Frame(frame)
+
+    left_col.pack(side="left", padx=20, pady=4)
+    right_col.pack(side="left", padx=20, pady=4)
+
+    # -------------------------
+    # LEVELS 1-4
+    # -------------------------
+
+    for lvl in range(1, 5):
+
+        row = tk.Frame(left_col)
+        row.pack(anchor="w", pady=2)
+
+        tk.Label(
+            row,
+            text=f"{lvl}",
+            width=2,
+            font=("Arial", 10, "bold")
+        ).pack(side="left")
+
+        var = tk.IntVar(value=0)
+
+        spell_slot_vars[lvl] = var
+
+        for i in range(4):
+
+            cb = tk.Checkbutton(
+                row,
+                variable=tk.IntVar(value=1)
+            )
+            cb.pack(side="left")
+
+        tk.Label(
+            row,
+            textvariable=var,
+            width=3,
+            fg="cyan"
+        ).pack(side="left", padx=4)
+
+    # -------------------------
+    # LEVELS 5-8
+    # -------------------------
+
+    for lvl in range(5, 9):
+
+        row = tk.Frame(right_col)
+        row.pack(anchor="w", pady=2)
+
+        tk.Label(
+            row,
+            text=f"{lvl}",
+            width=2,
+            font=("Arial", 10, "bold")
+        ).pack(side="left")
+
+        var = tk.IntVar(value=0)
+
+        spell_slot_vars[lvl] = var
+
+        for i in range(4):
+
+            cb = tk.Checkbutton(
+                row,
+                variable=tk.IntVar(value=1)
+            )
+            cb.pack(side="left")
+
+        tk.Label(
+            row,
+            textvariable=var,
+            width=3,
+            fg="cyan"
+        ).pack(side="left", padx=4)
+
+    # -------------------------
+    # LEVEL 9
+    # -------------------------
+
+    bottom = tk.Frame(frame)
+    bottom.pack(pady=4)
+
+    row = tk.Frame(bottom)
+    row.pack()
+
+    tk.Label(
+        row,
+        text="9",
+        width=2,
+        font=("Arial", 10, "bold")
+    ).pack(side="left")
+
+    var = tk.IntVar(value=0)
+
+    spell_slot_vars[9] = var
+
+    for i in range(4):
+
+        cb = tk.Checkbutton(
+            row,
+            variable=tk.IntVar(value=1)
+        )
+        cb.pack(side="left")
+
+    tk.Label(
+        row,
+        textvariable=var,
+        width=3,
+        fg="cyan"
+    ).pack(side="left", padx=4)
+build_spell_panel(spells_tab)
+
 
 
 build_inventory_tab(inventory_tab)
