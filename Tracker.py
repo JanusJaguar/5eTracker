@@ -9,6 +9,7 @@ import pandas as pd
 import random
 import winsound
 from vtt import build_vtt_tab
+from vtt_player import build_player_vtt_tab
 from minigames import SimTowerApp
 from notes import build_notes_tab
 from notes import build_companions_tab
@@ -201,15 +202,26 @@ def load_excel_data():
         valid_classes = ["Artificer","Barbarian","Bard","Cleric","Druid","Fighter",
                          "Monk","Paladin","Ranger","Rogue","Sorcerer","Warlock","Wizard"]
 
-        class_info_raw = cd[["Class","Spellcasting Ability","Hit Die"]].dropna(subset=["Class"])
+        class_info_raw = cd[["Class", "Spellcasting Ability", "Hit Die", "Caster_Type"]].dropna(subset=["Class"])
         class_info_raw = class_info_raw[class_info_raw["Class"].isin(valid_classes)]
 
         class_info = {}
         for _, row in class_info_raw.iterrows():
             sa = str(row["Spellcasting Ability"]).strip()
             class_info[row["Class"]] = {
-                "spell_ability": sa if sa not in ("nan","ALL") else "—",
-                "hit_die":       str(row["Hit Die"]).strip() if pd.notna(row["Hit Die"]) else "—",
+
+                "spell_ability":
+                    sa if sa not in ("nan", "ALL") else "—",
+
+                "hit_die":
+                    str(row["Hit Die"]).strip()
+                    if pd.notna(row["Hit Die"])
+                    else "—",
+
+                "caster_type":
+                    str(row["Caster_Type"]).strip()
+                    if pd.notna(row["Caster_Type"])
+                    else "None",
             }
 
         # Manual fixes: subclass-only casters and hit dice corrections
@@ -230,7 +242,7 @@ def load_excel_data():
 
         # Class -> subclass mapping
         prog_df = pd.read_excel(xl, sheet_name="SHEETS_PROGRESSION")
-
+        slots_df = pd.read_excel(xl, sheet_name="SHEET_SLOTS")
         subclass_map = {}
         sub_df = prog_df[prog_df["type"] == "subclass"]
 
@@ -244,8 +256,6 @@ def load_excel_data():
                 .tolist()
             )
             subclass_map[cls] = sorted(set(subs))
-
-
 
         # --- Spell Data ---
         sp = pd.read_excel(xl, sheet_name="Spell Data")
@@ -270,18 +280,46 @@ def load_excel_data():
                 print(f"Error loading {sheet_name}: {e}")
                 item_sheets[key] = pd.DataFrame()
 
-        return class_info, subclass_map, sp, item_sheets, race_list, background_list, prog_df
+        return (
+            class_info,
+            subclass_map,
+            sp,
+            item_sheets,
+            race_list,
+            background_list,
+            slots_df,
+            prog_df
+        )
         
     except FileNotFoundError:
         messagebox.showerror("Missing File",
             f"Cannot find dnd_data.xlsx\nExpected at:\n{DATA_FILE}")
-        return {}, {}, pd.DataFrame()
+        return (
+            {},                     # class_info
+            {},                     # subclass_map
+            pd.DataFrame(),         # spell_df
+            {},                     # item_sheets
+            [],                     # race_list
+            [],                     # background_list
+            pd.DataFrame(),         # prog_df
+            pd.DataFrame()          # slots_df
+        )
     except Exception as e:
         messagebox.showerror("Load Error", str(e))
-        return {}, {}, pd.DataFrame()
+        return (
+            {},                     # class_info
+            {},                     # subclass_map
+            pd.DataFrame(),         # spell_df
+            {},                     # item_sheets
+            [],                     # race_list
+            [],                     # background_list
+            pd.DataFrame(),         # prog_df
+            pd.DataFrame()          # slots_df
+        )
 
 
-CLASS_INFO, SUBCLASS_MAP, SPELL_DF, ITEM_SHEETS, RACE_LIST, BACKGROUND_LIST, PROG_DF = load_excel_data()
+CLASS_INFO, SUBCLASS_MAP, SPELL_DF, ITEM_SHEETS, \
+RACE_LIST, BACKGROUND_LIST, SLOTS_DF, PROG_DF = load_excel_data()
 
 SKILL_STAT = {
     "Acrobatics":     "DEX",
@@ -324,9 +362,6 @@ STAT_COL = {
     "WIS": "Wis",
     "CHA": "Cha",
 }
-
-
-
 known_listbox = None
 equip_listbox = None
 feats_listbox = None
@@ -347,7 +382,55 @@ def get_proficiency_bonus(level):
         return (int(level) - 1) // 4 + 2
     except (ValueError, TypeError):
         return 2
+def get_spell_slots():
 
+    slots = {
+        1:0, 2:0, 3:0,
+        4:0, 5:0, 6:0,
+        7:0, 8:0, 9:0
+    }
+
+    class_data = [
+        (class1_var.get(), int(class1_level_var.get())),
+        (class2_var.get(), int(class2_level_var.get()))
+    ]
+
+    for cls, lvl in class_data:
+
+        if cls not in CLASS_INFO:
+            continue
+
+        if lvl <= 0:
+            continue
+
+        caster_type = CLASS_INFO[cls].get("caster_type", "None")
+
+        if caster_type in ("None", "KI", "—"):
+            continue
+
+        row_name = f"L{lvl}_{caster_type}"
+
+        match = SLOTS_DF[
+            SLOTS_DF["Caster_Level"] == row_name
+        ]
+
+        if match.empty:
+            continue
+
+        row = match.iloc[0]
+
+        for spell_lvl in range(1, 10):
+
+            col = f"Slot_Level_{spell_lvl}"
+
+            if col in row:
+
+                try:
+                    slots[spell_lvl] += int(row[col])
+                except:
+                    pass
+
+    return slots
 def fmt_mod(n):
     return f"+{n}" if n >= 0 else str(n)
 
@@ -1148,7 +1231,108 @@ def open_character_wizard(parent, excel_path, class_info, subclass_map,
     # -----------------------------------------------------------------------
     # PAGE BUILDERS
     # -----------------------------------------------------------------------
- 
+    def get_spellcasting_info():
+
+        cls1 = class1_var.get()
+        cls2 = class2_var.get()
+
+        try:
+            lvl1 = int(class1_level_var.get())
+        except:
+            lvl1 = 0
+
+        try:
+            lvl2 = int(class2_level_var.get())
+        except:
+            lvl2 = 0
+
+        result = {
+            "caster_level": 0,
+            "spell_ability": "—",
+            "spell_mod": 0,
+            "save_dc": 0,
+            "attack_bonus": 0,
+            "slots_key": None,
+        }
+
+        # -------------------------
+        # PRIMARY CLASS
+        # -------------------------
+
+        main_class = None
+        main_level = 0
+
+        if cls1 in CLASS_INFO and lvl1 > 0:
+            main_class = cls1
+            main_level = lvl1
+
+        elif cls2 in CLASS_INFO and lvl2 > 0:
+            main_class = cls2
+            main_level = lvl2
+
+        if not main_class:
+            return result
+
+        info = CLASS_INFO[main_class]
+
+        caster_type = info.get("caster_type", "None")
+        spell_ability = info.get("spell_ability", "—")
+
+        # -------------------------
+        # SPELL MODIFIER
+        # -------------------------
+
+        if spell_ability in mods_hive:
+
+            spell_mod = mods_hive[spell_ability]
+
+            prof_bonus = get_proficiency_bonus(
+                lvl1 + lvl2
+            )
+
+            save_dc = 8 + prof_bonus + spell_mod
+
+            attack_bonus = prof_bonus + spell_mod
+
+        else:
+            spell_mod = 0
+            save_dc = 0
+            attack_bonus = 0
+
+        # -------------------------
+        # SLOT KEY
+        # -------------------------
+
+        if caster_type not in ("None", "—"):
+
+            slots_key = f"L{main_level}_{caster_type}"
+
+        else:
+            slots_key = None
+
+        result = {
+
+            "caster_level":
+                main_level,
+
+            "spell_ability":
+                spell_ability,
+
+            "spell_mod":
+                spell_mod,
+
+            "save_dc":
+                save_dc,
+
+            "attack_bonus":
+                attack_bonus,
+
+            "slots_key":
+                slots_key,
+        }
+
+        return result
+
     def page_details():
         clear_content()
         page_title_lbl.config(text="Name & Details")
@@ -2071,8 +2255,6 @@ def open_levelup_popup():
               font=("Arial", 11, "bold"),
               width=20).pack(pady=10)
 
-
-
 def build_feats_tab(parent):
     global feats_listbox, feats_desc_text
 
@@ -2217,7 +2399,8 @@ def refresh_feats():
     df = PROG_DF
     df["class_level"] = pd.to_numeric(df["class_level"], errors="coerce").fillna(0)
     all_feats = pd.DataFrame()
-
+    if df.empty:
+        return
     # =========================
     # CLASS 1
     # =========================
@@ -2311,6 +2494,79 @@ def refresh_feats():
 # ---------------------------------------------------------------------------
 # BUILD000: CHARACTER IDENTITY
 # ---------------------------------------------------------------------------
+
+def get_spell_slots():
+
+    slots = {
+        1:0, 2:0, 3:0,
+        4:0, 5:0, 6:0,
+        7:0, 8:0, 9:0
+    }
+
+    class_data = [
+        (class1_var.get(), int(class1_level_var.get())),
+        (class2_var.get(), int(class2_level_var.get()))
+    ]
+
+    for cls, lvl in class_data:
+
+        if cls not in CLASS_INFO:
+            continue
+
+        if lvl <= 0:
+            continue
+
+        caster_type = CLASS_INFO[cls].get("caster_type", "None")
+
+        if caster_type in ("None", "KI", "—"):
+            continue
+
+        row_name = f"L{lvl}_{caster_type}"
+
+        match = SLOTS_DF[
+            SLOTS_DF["Caster_Level"] == row_name
+        ]
+
+        if match.empty:
+            continue
+
+        row = match.iloc[0]
+
+        for spell_lvl in range(1, 10):
+
+            col = f"Slot_Level_{spell_lvl}"
+
+            if col in row:
+
+                try:
+                    slots[spell_lvl] += int(row[col])
+                except:
+                    pass
+
+    return slots
+def update_spell_slots():
+
+    slots = get_spell_slots()
+
+    for level in range(1, 10):
+
+        max_slots = slots.get(level, 0)
+
+        if level not in spell_slot_vars:
+            continue
+
+        current_slots = spell_slot_vars[level]
+
+        # Resize slot list to match actual max slots
+        while len(current_slots) < max_slots:
+            current_slots.append(True)
+
+        while len(current_slots) > max_slots:
+            current_slots.pop()
+
+    refresh_spell_slots()
+
+
 
 def build_identity(parent):
     frame = ttk.LabelFrame(parent, text=" Character Identity ")
@@ -2431,7 +2687,6 @@ def build_identity(parent):
     )
     subclass2_box.grid(row=1, column=5, padx=0, pady=4)
 
-    
     # Row 3: Auto-filled readouts
     tk.Label(frame, text="Spell Ability:").grid(row=1, column=2, sticky="w", padx=4)
     spell_ability_lbl = tk.Label(frame, text="—", fg="blue", font=("Arial",10,"bold"))
@@ -2487,9 +2742,24 @@ def build_identity(parent):
     level_var.trace_add("write", lambda *args: refresh_feats())
     class1_var.trace_add("write", update_hit_dice)
     class2_var.trace_add("write", update_hit_dice)
-
     class1_level_var.trace_add("write", update_hit_dice)
     class2_level_var.trace_add("write", update_hit_dice)
+    class1_var.trace_add(
+        "write",
+        lambda *_: update_spell_slots()
+    )
+    class2_var.trace_add(
+        "write",
+        lambda *_: update_spell_slots()
+    )
+    class1_level_var.trace_add(
+        "write",
+        lambda *_: update_spell_slots()
+    )
+    class2_level_var.trace_add(
+        "write",
+        lambda *_: update_spell_slots()
+    )
 
 def build_save_load(parent):
     global prof_text   
@@ -2576,7 +2846,6 @@ def build_combat_hud(parent):
         tk.Label(cell, text=lbl, font=("Arial",8)).pack()
         tk.Entry(cell, textvariable=hp_vars[key], width=6,
                  font=("Arial",13,"bold"), justify="center", fg=fg).pack()
-
 
 
 # -------------------------
@@ -2953,6 +3222,10 @@ def toggle_spell_slot(level, index):
 
     slots = spell_slot_vars[level]
 
+    # Ignore clicks beyond current slot count
+    if index >= len(slots):
+        return
+
     slots[index] = not slots[index]
 
     refresh_spell_slots()
@@ -2964,10 +3237,17 @@ def refresh_spell_slots():
 
         for i, lbl in enumerate(labels):
 
-            if slots[i]:
-                lbl.config(text="★", fg="cyan")
+            # Hide unused slot stars
+            if i >= len(slots):
+
+                lbl.config(text=" ", fg="gray")
+
             else:
-                lbl.config(text="☆", fg="red")
+
+                if slots[i]:
+                    lbl.config(text="★", fg="cyan")
+                else:
+                    lbl.config(text="☆", fg="red")
 
 
 
@@ -4073,7 +4353,7 @@ notes_tab = tk.Frame(notebook)
 pets_tab = tk.Frame(notebook)
 hb_tab = tk.Frame(notebook)
 vtt_tab = tk.Frame(notebook)
-#notebook.add(vtt_tab, text="vtt")
+player_vtt_tab = tk.Frame(notebook)
 
 notebook.add(sheet_outer, text="Character")
 # Canvas + Scrollbar
@@ -4125,9 +4405,19 @@ notebook.add(pets_tab, text="Companions")
 notebook.add(hb_tab, text="Homebrew")
 
 
-
 simtower = SimTowerApp(hb_tab)
-build_spell_panel(spells_tab)
+
+
+def build_spell_slot_panel(parent):
+
+    global spell_slot_vars
+    spell_frame = ttk.LabelFrame(parent, text=" Spellcasting ")
+    spell_frame.pack(fill="x", padx=6, pady=6)
+
+    build_spell_slot_panel(spell_frame)
+refresh_spells()
+
+
 build_inventory_tab(inventory_tab)
 
 build_background_tab(background_tab)
@@ -4139,13 +4429,15 @@ build_companions_tab(pets_tab)
 #
 build_feats_tab(feats_tab)
 build_identity(sheet_tab)
-#build_ability_scores(sheet_tab)
+update_spell_slots()
 build_save_load(sheet_tab)
 
 mid = tk.Frame(sheet_tab)
 mid.pack(fill="x", padx=10, pady=5)
 #build_utility(mid)
 build_combat_hud(mid)
+
+
 
 def build_dice_tray(parent):
     global tray_label, tray_history
@@ -4178,19 +4470,34 @@ build_skills(mid)
 for stat in ["STR","DEX","CON","INT","WIS","CHA"]:
     on_stat_change(stat)
 
+player_vtt_built = False
+
 def update_mode(*_):
-    global vtt_built
+    global vtt_built, player_vtt_built
     mode = mode_var.get()
+
     if mode == "DM":
         notebook.add(vtt_tab, text="🗺️ VTT")
         if not vtt_built:
             build_vtt_tab(vtt_tab)
             vtt_built = True
-    else:
+        try:
+            notebook.hide(player_vtt_tab)
+        except:
+            pass
+
+    else:  # Player mode
         try:
             notebook.hide(vtt_tab)
         except:
             pass
+        notebook.add(player_vtt_tab, text="⚔️ Battle Map")
+        if not player_vtt_built:
+            build_player_vtt_tab(
+                player_vtt_tab,
+                lambda: name_entry.get()
+            )
+            player_vtt_built = True
 mode_var.trace_add("write", update_mode)
 
 
