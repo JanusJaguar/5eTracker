@@ -3358,6 +3358,9 @@ def show_spell_detail(event=None):
 def build_spell_panel(parent):
     global spell_class_var, spell_level_var, spell_search_var, spell_listbox, count_label, known_listbox, equip_listbox, diagram_canvas
 
+    top_bar = tk.Frame(parent)
+    top_bar.pack(fill="x", padx=6, pady=4)
+
     main_row = tk.Frame(parent)
     main_row.pack(fill="both", expand=True)
     
@@ -3388,7 +3391,7 @@ def build_spell_panel(parent):
     diagram_canvas.pack(fill="both", expand=True)
 
 
-    bar = tk.Frame(main_row)
+    bar = top_bar
     bar.pack(fill="x", padx=6, pady=4)
 
     tk.Label(bar, text="Class:").pack(side="left")
@@ -3429,6 +3432,7 @@ def build_spell_panel(parent):
     spell_listbox.bind("<Button-2>", show_spell_detail)
     spell_listbox.bind("<Return>",          show_spell_detail)
 
+    build_spell_slot_panel(diagram_col)
     refresh_spells()
     def add_to_known(event=None):
         sel = spell_listbox.curselection()
