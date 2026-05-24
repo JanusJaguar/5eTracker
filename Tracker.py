@@ -10,6 +10,7 @@ import random
 import winsound
 from vtt import build_vtt_tab
 from vtt_player import build_player_vtt_tab
+from npc_mode import NPCMode
 from minigames import SimTowerApp
 from notes import build_notes_tab
 from notes import build_companions_tab
@@ -4329,6 +4330,7 @@ feats_tab = tk.Frame(notebook)
 background_tab = tk.Frame(notebook)
 notes_tab = tk.Frame(notebook)
 pets_tab = tk.Frame(notebook)
+npc_tab = tk.Frame(notebook)
 hb_tab = tk.Frame(notebook)
 vtt_tab = tk.Frame(notebook)
 player_vtt_tab = tk.Frame(notebook)
@@ -4380,6 +4382,7 @@ notebook.add(background_tab,  text="Background")
 #notebook.add(items_tab,  text="Items")
 notebook.add(notes_tab, text="Notes")
 notebook.add(pets_tab, text="Companions")
+notebook.add(npc_tab, text="NPC Mode")
 notebook.add(hb_tab, text="Homebrew")
 
 
@@ -4390,122 +4393,8 @@ def build_spell_slot_panel(parent):
 
     global spell_slot_vars
 
-    frame = ttk.LabelFrame(parent, text=" Spell Slots ")
-    frame.pack(fill="x", padx=6, pady=6)
-
-    left_col = tk.Frame(frame)
-    right_col = tk.Frame(frame)
-
-    left_col.pack(side="left", padx=20, pady=4)
-    right_col.pack(side="left", padx=20, pady=4)
-
-    # -------------------------
-    # LEVELS 1-4
-    # -------------------------
-
-    for lvl in range(1, 5):
-
-        row = tk.Frame(left_col)
-        row.pack(anchor="w", pady=2)
-
-        tk.Label(
-            row,
-            text=f"{lvl}",
-            width=2,
-            font=("Arial", 10, "bold")
-        ).pack(side="left")
-
-        var = tk.IntVar(value=0)
-
-        spell_slot_vars[lvl] = var
-
-        for i in range(4):
-
-            cb = tk.Checkbutton(
-                row,
-                variable=tk.IntVar(value=1)
-            )
-            cb.pack(side="left")
-
-        tk.Label(
-            row,
-            textvariable=var,
-            width=3,
-            fg="cyan"
-        ).pack(side="left", padx=4)
-
-    # -------------------------
-    # LEVELS 5-8
-    # -------------------------
-
-    for lvl in range(5, 9):
-
-        row = tk.Frame(right_col)
-        row.pack(anchor="w", pady=2)
-
-        tk.Label(
-            row,
-            text=f"{lvl}",
-            width=2,
-            font=("Arial", 10, "bold")
-        ).pack(side="left")
-
-        var = tk.IntVar(value=0)
-
-        spell_slot_vars[lvl] = var
-
-        for i in range(4):
-
-            cb = tk.Checkbutton(
-                row,
-                variable=tk.IntVar(value=1)
-            )
-            cb.pack(side="left")
-
-        tk.Label(
-            row,
-            textvariable=var,
-            width=3,
-            fg="cyan"
-        ).pack(side="left", padx=4)
-
-    # -------------------------
-    # LEVEL 9
-    # -------------------------
-
-    bottom = tk.Frame(frame)
-    bottom.pack(pady=4)
-
-    row = tk.Frame(bottom)
-    row.pack()
-
-    tk.Label(
-        row,
-        text="9",
-        width=2,
-        font=("Arial", 10, "bold")
-    ).pack(side="left")
-
-    var = tk.IntVar(value=0)
-
-    spell_slot_vars[9] = var
-
-    for i in range(4):
-
-        cb = tk.Checkbutton(
-            row,
-            variable=tk.IntVar(value=1)
-        )
-        cb.pack(side="left")
-
-    tk.Label(
-        row,
-        textvariable=var,
-        width=3,
-        fg="cyan"
-    ).pack(side="left", padx=4)
 build_spell_panel(spells_tab)
-
+NPCMode(npc_tab)
 
 
 build_inventory_tab(inventory_tab)
