@@ -157,7 +157,8 @@ ARMOR_STYLE = {
 
 spell_slot_vars = {}
 spell_slot_labels = {}
-
+npc_list = []
+initiative_active = False
 def calculate_ac(equipped_items):
     """Calculate AC from equipped armor list."""
     dex_mod = mods_hive.get("DEX", 0)
@@ -243,7 +244,6 @@ def load_excel_data():
 
         # Class -> subclass mapping
         prog_df = pd.read_excel(xl, sheet_name="SHEETS_PROGRESSION")
-        slots_df = pd.read_excel(xl, sheet_name="SHEET_SLOTS")
         subclass_map = {}
         sub_df = prog_df[prog_df["type"] == "subclass"]
 
@@ -261,6 +261,8 @@ def load_excel_data():
         # --- Spell Data ---
         sp = pd.read_excel(xl, sheet_name="Spell Data")
         sp["classes"] = sp["classes"].fillna("")
+
+        slots_df = pd.read_excel(xl, sheet_name="SHEET_SLOTS")
 
         # --- Item Data ---
         ITEM_SHEETS = {
@@ -4027,9 +4029,6 @@ def parse_cost(cost_text):
     except:
         return 0
 
-
-
-
 # ---------------------------------------------------------------------------
 # BUILD001: ITEM LOOKUP
 # ---------------------------------------------------------------------------
@@ -4394,8 +4393,12 @@ def build_spell_slot_panel(parent):
     global spell_slot_vars
 
 build_spell_panel(spells_tab)
+
 NPCMode(npc_tab)
 
+npc_mode_instance = NPCMode(npc_tab)
+vtt = VTT(root, npc_mode_instance)
+vtt.npc_ai_tick()
 
 build_inventory_tab(inventory_tab)
 
@@ -4448,8 +4451,9 @@ build_dice_tray(sheet_tab)
 build_skills(mid)
 for stat in ["STR","DEX","CON","INT","WIS","CHA"]:
     on_stat_change(stat)
-
 player_vtt_built = False
+
+
 
 def update_mode(*_):
     global vtt_built, player_vtt_built
@@ -4478,7 +4482,6 @@ def update_mode(*_):
             )
             player_vtt_built = True
 mode_var.trace_add("write", update_mode)
-
 
 
 #----------------------------------
