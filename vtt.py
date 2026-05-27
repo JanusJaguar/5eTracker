@@ -31,7 +31,8 @@ for _d in (MAPS_DIR, PLAYER_DIR, ENEMY_DIR):
 
 IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
-
+tokens = {}
+#canvas = None
 def list_images(folder):
     if not os.path.isdir(folder):
         return []
@@ -322,67 +323,71 @@ class SceneImage:
 # ---------------------------------------------------------------------------
 
 class VTT:
-    def __init__(self, root, npc_mode):
+    def __init__(self, root, npc_mode, vtt_tab):
         self.root = root
         self.npc_mode = npc_mode
-        self.tokens = {}
-    def create_npc_token(self, name, x=100, y=100):
+        self.vtt_tab = vtt_tab
 
-        token = self.canvas.create_oval(
-            x,
-            y,
-            x + 20,
-            y + 20,
-            fill="red"
+        self.state = {
+            "tokens": []
+        }
+        self.state["tokens"] = []
+
+        self.canvas = tk.Canvas(vtt_tab, bg="#1a1a2e", cursor="crosshair")
+        self.canvas.pack(fill="both", expand=True)
+    def create_npc_token(self, npc_name, x=100, y=100):
+
+        token_id = self.canvas.create_oval(
+            x, y, x+20, y+20,
+            fill="red",
+            tags=("token", npc_name)
         )
 
-        self.tokens[name] = token
+        self.state["tokens"].append({
+            "name": npc_name,
+            "x": x,
+            "y": y,
+            "id": token_id
+        })
+        return token_id
+    def get_token_by_name(self, name):
+
+        for token in self.state["tokens"]:
+            if token["name"] == name:
+                return token
+
+        return None
     def npc_ai_tick(self):
 
         npc_dict = self.npc_mode.get_npcs()
 
         for name, npc in npc_dict.items():
             self.process_npc_gambits(name, npc)
-
         self.root.after(1000, self.npc_ai_tick)
-    def process_npc_gambits(self, name, npc):
 
-        gambits = npc.get("gambits", [])
-
-        if not gambits:
-            return
-
-        current = gambits[0]
-
-        if current == "wander":
-            self.gambit_wander(name, npc)
-    def gambit_wander(self, name, npc):
-
-        dx = random.choice([-1, 0, 1])
-        dy = random.choice([-1, 0, 1])
-
-        npc["x"] = npc.get("x", 100) + dx * 10
-        npc["y"] = npc.get("y", 100) + dy * 10
-
-        self.update_token_position(name, npc["x"], npc["y"])
     def update_token_position(self, name, x, y):
 
         token = self.tokens.get(name)
 
-        if token:
-            self.canvas.coords(
-                token,
-                x,
-                y,
-                x + 20,
-                y + 20
-            )
+        if not token:
+            return
+
+        self.canvas.coords(
+            token["id"],
+            x, y,
+            x + 20,
+            y + 20
+        )
+
+        token["x"] = x
+        token["y"] = y
 class Token:
     def __init__(self, canvas, col, row, cell_px, label="Token",
                  color="#e74c3c", img_path=None, speed=6,
                  hp=None, token_type="enemy"):
         self.canvas     = canvas
         self.label      = label
+        self.name       = label
         self.color      = color
         self.cell_px    = cell_px
         self.grid_col   = col
@@ -409,7 +414,7 @@ class Token:
                 x, y, image=self._photo, anchor="nw",
                 tags=("token_layer", "token"))
         else:
-            self.oval = canvas.create_oval(
+            self.oval = self.canvas.create_oval(
                 x, y, x+cell_px, y+cell_px,
                 fill=color, outline="white", width=2,
                 tags=("token_layer", "token"))
@@ -910,7 +915,24 @@ def _token_from_dict(canvas, td, cell_px):
     tok.vision_range  = td.get("vision_range",  0)
     return tok
 
+def process_npc_gambits(self, name, npc):
 
+    for g in npc.get("gambits", []):
+
+        if g == "wander":
+            self.gambit_wander(name, npc)
+
+        elif g == "pause":
+            pass
+def gambit_wander(self, name, npc):
+    dx = random.choice([-1, 0, 1])
+    dy = random.choice([-1, 0, 1])
+
+    self.update_token_position(
+        name,
+        npc["x"] + dx * 10,
+        npc["y"] + dy * 10
+    )
 def save_scene(state, vtt_canvas):
     file = tk.filedialog.asksaveasfilename(
         title="Save Scene", defaultextension=".json",
@@ -931,7 +953,6 @@ def save_scene(state, vtt_canvas):
         messagebox.showinfo("Saved", "✅ Scene saved!")
     except Exception as e:
         messagebox.showerror("Save Error", str(e))
-
 
 def load_scene(state, vtt_canvas, redraw_fn,
                scene_name_var, update_image_list_fn):
@@ -973,8 +994,6 @@ def load_scene(state, vtt_canvas, redraw_fn,
             f"✅ Scene '{state['scene_name']}' loaded!")
     except Exception as e:
         messagebox.showerror("Load Error", str(e))
-
-
 def save_vtt_state(tokens):
     file = tk.filedialog.asksaveasfilename(
         title="Save Tokens", defaultextension=".json",
@@ -986,8 +1005,6 @@ def save_vtt_state(tokens):
         messagebox.showinfo("Saved", f"✅ Saved {len(tokens)} tokens!")
     except Exception as e:
         messagebox.showerror("Save Error", str(e))
-
-
 def load_vtt_state(state, vtt_canvas, redraw_fn):
     file = tk.filedialog.askopenfilename(
         title="Load Tokens", initialdir=BASE_DIR,
@@ -1033,7 +1050,7 @@ def build_vtt_tab(parent):
         "current_turn_idx": 0,
         "combat_active":    False,
     }
-
+    global canvas
     # -----------------------------------------------------------------------
     # TOOLBAR
     # -----------------------------------------------------------------------
@@ -1609,6 +1626,7 @@ def build_vtt_tab(parent):
     # -----------------------------------------------------------------------
     # TOKEN PLACER
     # -----------------------------------------------------------------------
+
     def place_token(category="players"):
         folder  = PLAYER_DIR if category == "players" else ENEMY_DIR
         options = list_images(folder)
@@ -1659,7 +1677,11 @@ def build_vtt_tab(parent):
 
         tk.Button(win, text="✅ Place Token", command=confirm,
                   bg="#27ae60", fg="white").pack(pady=14)
-
+    def get_token(name):
+        for t in state["tokens"]:
+            if t.name == name:
+                return t
+        return None
     # -----------------------------------------------------------------------
     # INITIATIVE
     # -----------------------------------------------------------------------
@@ -2089,5 +2111,5 @@ def build_vtt_tab(parent):
     # -----------------------------------------------------------------------
     # INITIAL DRAW
     # -----------------------------------------------------------------------
+    
     parent.after(100, redraw_all)
-
