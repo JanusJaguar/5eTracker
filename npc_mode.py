@@ -1,9 +1,6 @@
 import tkinter as tk
 from tkinter import ttk
-
-
-
-
+import random
 # Globals
 npc_state = {
     "hp": 40,
@@ -12,6 +9,14 @@ npc_state = {
     "enemy_visible": True,
     "ally_downed": False,
 }
+GAMBIT_LIBRARY = [
+    "wander",
+    "pause",
+    "attack_if_adjacent",
+    "flee_if_low_hp",
+    "patrol"
+]
+
 
 # Start
 class NPCMode:
@@ -19,13 +24,10 @@ class NPCMode:
     def __init__(self, parent):
 
         self.parent = parent
-
         self.npcs = {}
-
         self.selected_npc = None
-
         self.build_ui()
-
+        self.gambits = []
     # -------------------------------------------------
     # UI
     # -------------------------------------------------
@@ -34,25 +36,6 @@ class NPCMode:
 
         main = tk.Frame(self.parent)
         main.pack(fill="both", expand=True)
-
-    # -------------------------
-    # AI LOG
-    # -------------------------
-
-        global action_log
-
-        log_frame = ttk.LabelFrame(root, text=" AI Log ")
-        log_frame.pack(fill="both", expand=True, padx=6, pady=6)
-
-        action_log = tk.Text(
-            log_frame,
-            height=8,
-            bg="#101010",
-            fg="#00ff99",
-            font=("Courier", 10)
-        )
-
-        action_log.pack(fill="both", expand=True)
 
         # =============================================
         # LEFT PANEL
@@ -109,7 +92,7 @@ class NPCMode:
         self.name_var = tk.StringVar()
         self.hp_var = tk.IntVar(value=10)
         self.ac_var = tk.IntVar(value=10)
-        self.speed_var = tk.IntVar(value=30)
+        self.speed_var = tk.IntVar(value=300)
 
         self.make_stat_row(stats_frame, "Name", self.name_var)
         self.make_stat_row(stats_frame, "HP", self.hp_var)
@@ -120,36 +103,39 @@ class NPCMode:
         # RIGHT PANEL
         # =============================================
 
-        gambit_frame = ttk.LabelFrame(root, text=" Gambits ")
-        gambit_frame.pack(fill="both", expand=True, padx=6, pady=6)
+        right = tk.Frame(main)
+        right.pack(side="left", fill="both", padx=5, pady=5)
 
-        gambit_listbox = tk.Listbox(
-            gambit_frame,
-            height=10,
-            width=50
+        gambit_frame = ttk.LabelFrame(
+            right,
+            text=" Gambits "
         )
 
-        gambit_listbox.pack(fill="both", expand=True, padx=4, pady=4)
+        gambit_frame.pack(fill="both", expand=True)
 
-        button_row = tk.Frame(gambit_frame)
-        button_row.pack(fill="x")
+        self.gambit_listbox = tk.Listbox(
+            gambit_frame,
+            width=40,
+            height=20
+        )
+
+        self.gambit_listbox.pack(fill="both", expand=True, pady=4)
 
         tk.Button(
-            button_row,
+            gambit_frame,
             text="+ Add Gambit",
-            command=open_gambit_editor
-        ).pack(side="left", padx=4)
+            command=self.add_gambit
+        ).pack(fill="x", pady=2)
 
         tk.Button(
-            button_row,
-            text="- Remove",
-            command=remove_gambit
-        ).pack(side="left", padx=4)
-        tk.Button(
-            button_row,
-            text="▶ Run Gambits",
-            command=run_gambits
-        ).pack(side="left", padx=4)
+            gambit_frame,
+            text="- Remove Gambit",
+            command=self.remove_gambit
+        ).pack(fill="x")
+
+        self.gambit_entry = tk.Entry(gambit_frame)
+        self.gambit_entry.pack(fill="x")
+
     # -------------------------------------------------
     # HELPERS
     # -------------------------------------------------
@@ -190,34 +176,12 @@ class NPCMode:
             return npc_state["ally_downed"]
 
         return False
-    def perform_action(gambit):
 
-        global action_log
-
-        action = gambit["action"]
-        target = gambit["target"]
-
-        result = f"{action} -> {target}"
-
-        action_log.insert(
-            tk.END,
-            result + "\n"
-        )
-
-        action_log.see(tk.END)
-    def run_gambits():
-
-        for gambit in npc_gambits:
-
-            if evaluate_condition(gambit):
-
-                perform_action(gambit)
-
-                break
     # -------------------------------------------------
     # NPC FUNCTIONS
     # -------------------------------------------------
-
+    def get_npcs(self):
+        return self.npcs
     def add_npc(self):
 
         name = f"NPC {len(self.npcs)+1}"
@@ -225,7 +189,7 @@ class NPCMode:
         self.npcs[name] = {
             "hp": 10,
             "ac": 10,
-            "speed": 30,
+            "speed": 300,
             "gambits": []
         }
 
@@ -274,18 +238,19 @@ class NPCMode:
     # -------------------------------------------------
     # GAMBITS
     # -------------------------------------------------
-
     def add_gambit(self):
 
         if not self.selected_npc:
             return
 
-        gambit = "IF Enemy Adjacent → Attack"
+        gambit = random.choice([
+            "wander",
+            "pause"
+        ])
 
         self.npcs[self.selected_npc]["gambits"].append(gambit)
 
         self.refresh_gambits()
-
     def remove_gambit(self):
 
         sel = self.gambit_listbox.curselection()
@@ -309,73 +274,3 @@ class NPCMode:
         for g in self.npcs[self.selected_npc]["gambits"]:
             self.gambit_listbox.insert(tk.END, g)
 
-def open_gambit_editor():
-
-    popup = tk.Toplevel()
-
-    popup.title("Add Gambit")
-    popup.geometry("300x220")
-
-    # -------------------------
-    # DROPDOWN DATA
-    # -------------------------
-
-    conditions = [
-        "Enemy Adjacent",
-        "Enemy Visible",
-        "HP Below 50%",
-        "Ally Downed",
-    ]
-
-    actions = [
-        "Attack",
-        "Move Toward",
-        "Retreat",
-        "Defend",
-    ]
-
-    targets = [
-        "Nearest",
-        "Lowest HP",
-        "Self",
-        "Random",
-    ]
-
-    # -------------------------
-    # VARIABLES
-    # -------------------------
-
-    condition_var = tk.StringVar(value=conditions[0])
-    action_var = tk.StringVar(value=actions[0])
-    target_var = tk.StringVar(value=targets[0])
-
-    # -------------------------
-    # UI
-    # -------------------------
-
-    tk.Label(popup, text="Condition").pack(pady=(8,0))
-
-    ttk.Combobox(
-        popup,
-        textvariable=condition_var,
-        values=conditions,
-        state="readonly"
-    ).pack()
-
-    tk.Label(popup, text="Action").pack(pady=(8,0))
-
-    ttk.Combobox(
-        popup,
-        textvariable=action_var,
-        values=actions,
-        state="readonly"
-    ).pack()
-
-    tk.Label(popup, text="Target").pack(pady=(8,0))
-
-    ttk.Combobox(
-        popup,
-        textvariable=target_var,
-        values=targets,
-        state="readonly"
-    ).pack()
