@@ -332,31 +332,42 @@ class VTT:
             "tokens": []
         }
         self.state["tokens"] = []
-
-        self.canvas = tk.Canvas(vtt_tab, bg="#1a1a2e", cursor="crosshair")
-        self.canvas.pack(fill="both", expand=True)
-    def create_npc_token(self, npc_name, x=100, y=100):
-
-        token_id = self.canvas.create_oval(
-            x, y, x+20, y+20,
-            fill="red",
-            tags=("token", npc_name)
-        )
-
-        self.state["tokens"].append({
-            "name": npc_name,
-            "x": x,
-            "y": y,
-            "id": token_id
-        })
-        return token_id
     def get_token_by_name(self, name):
 
         for token in self.state["tokens"]:
+            print("INSIDE LOOP:", token)
+
             if token["name"] == name:
                 return token
 
         return None
+    def process_npc_gambits(self, name, npc):
+
+        gambits = npc.get("gambits", [])
+
+        for gambit in gambits:
+
+            if gambit == "wander":
+                self.gambit_wander(npc["name"])
+
+            elif gambit == "pause":
+                return
+    def gambit_wander(self, npc_name):
+        token = self.get_token_by_name(npc_name)
+
+        if not token:
+            return
+
+        dx = random.choice([-1, 0, 1])
+        dy = random.choice([-1, 0, 1])
+
+        move_amount = 10
+
+        self.canvas.move(
+            token.id,
+            dx * move_amount,
+            dy * move_amount
+        )
     def npc_ai_tick(self):
 
         npc_dict = self.npc_mode.get_npcs()
@@ -905,7 +916,7 @@ def _token_from_dict(canvas, td, cell_px):
     tok = Token(canvas, td["col"], td["row"], cell_px,
                 label=td["name"],
                 color=td.get("color", "#e74c3c"),
-                speed=td.get("speed", 6),
+                speed=td.get("speed", 60),
                 hp=td.get("hp") or None,
                 token_type=td.get("type", "enemy"),
                 img_path=ip)
@@ -914,25 +925,24 @@ def _token_from_dict(canvas, td, cell_px):
     tok.darkvision    = td.get("darkvision",    0)
     tok.vision_range  = td.get("vision_range",  0)
     return tok
+def create_token(self, name, x=100, y=100):
 
-def process_npc_gambits(self, name, npc):
-
-    for g in npc.get("gambits", []):
-
-        if g == "wander":
-            self.gambit_wander(name, npc)
-
-        elif g == "pause":
-            pass
-def gambit_wander(self, name, npc):
-    dx = random.choice([-1, 0, 1])
-    dy = random.choice([-1, 0, 1])
-
-    self.update_token_position(
-        name,
-        npc["x"] + dx * 10,
-        npc["y"] + dy * 10
+    tok = Token(
+        self.canvas,
+        x // self.state["cell_px"],
+        y // self.state["cell_px"],
+        self.state["cell_px"],
+        label=name,
+        color="red",
+        speed=60,
+        hp=None,
+        token_type="enemy"
     )
+
+    self.state["tokens"].append(tok)
+
+    return tok
+
 def save_scene(state, vtt_canvas):
     file = tk.filedialog.asksaveasfilename(
         title="Save Scene", defaultextension=".json",
