@@ -21,9 +21,27 @@ GAMBIT_LIBRARY = [
 # Start
 class NPCMode:
 
-    def __init__(self, parent):
+    def load_selected_npc(self, event=None):
+        sel = self.npc_listbox.curselection()
+        if not sel:
+            return
+
+        name = self.npc_listbox.get(sel[0])
+        self.selected_npc = name
+
+        npc = self.npcs[name]
+
+        self.name_var.set(name)
+        self.hp_var.set(npc["hp"])
+        self.ac_var.set(npc["ac"])
+        self.speed_var.set(npc["speed"])
+
+        self.refresh_gambits()
+
+    def __init__(self, parent, vtt):
 
         self.parent = parent
+        self.vtt = vtt
         self.npcs = {}
         self.selected_npc = None
         self.build_ui()
@@ -183,18 +201,16 @@ class NPCMode:
     def get_npcs(self):
         return self.npcs
     def add_npc(self):
-
         name = f"NPC {len(self.npcs)+1}"
-
         self.npcs[name] = {
             "hp": 10,
             "ac": 10,
-            "speed": 300,
+            "speed": 30,
             "gambits": []
         }
 
         self.refresh_npc_list()
-
+        self.vtt.create_token(name)
     def remove_npc(self):
 
         sel = self.npc_listbox.curselection()
@@ -202,9 +218,14 @@ class NPCMode:
         if not sel:
             return
 
-        name = self.npc_listbox.get(sel[0])
+        index = sel[0]
 
-        del self.npcs[name]
+        npc_id = self.listbox_index_to_id.get(index)
+
+        if not npc_id:
+            return
+
+        del self.npcs[npc_id]
 
         self.refresh_npc_list()
 
@@ -212,28 +233,10 @@ class NPCMode:
 
         self.npc_listbox.delete(0, tk.END)
 
-        for npc in self.npcs:
-            self.npc_listbox.insert(tk.END, npc)
+        for name in self.npcs:
+            self.npc_listbox.insert(tk.END, name)
 
-    def load_selected_npc(self, event=None):
 
-        sel = self.npc_listbox.curselection()
-
-        if not sel:
-            return
-
-        name = self.npc_listbox.get(sel[0])
-
-        self.selected_npc = name
-
-        npc = self.npcs[name]
-
-        self.name_var.set(name)
-        self.hp_var.set(npc["hp"])
-        self.ac_var.set(npc["ac"])
-        self.speed_var.set(npc["speed"])
-
-        self.refresh_gambits()
 
     # -------------------------------------------------
     # GAMBITS
