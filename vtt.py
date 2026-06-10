@@ -1,14 +1,8 @@
-
-# LAYERS (bottom → top):
-#   MAP LAYER      — background images, freely placed/resized (lockable)
-#   TILE LAYER     — grid, labels, painted mapstate cells    (lockable)
-#   TOKEN LAYER    — tokens, rings, move counters            (lockable)
-# ---------------------------------------------------------------------------
-
 import os
 import json
 import uuid
 import tkinter as tk
+from tkinter import ttk
 from tkinter import ttk, messagebox, simpledialog
 import random
 try:
@@ -33,6 +27,42 @@ IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 tokens = {}
 #canvas = None
+SHOP_INVENTORIES = {}
+
+def load_shops():
+    """Load shop inventories from shops.json file."""
+    global SHOP_INVENTORIES
+    
+    # Get the path to shops.json (same folder as this file)
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    shop_file = os.path.join(current_dir, "shops.json")
+    
+    try:
+        with open(shop_file, "r", encoding="utf-8") as f:
+            SHOP_INVENTORIES = json.load(f)
+        print(f"✅ Loaded {len(SHOP_INVENTORIES)} shop inventories from shops.json")
+        for shop_name, items in SHOP_INVENTORIES.items():
+            print(f"   - {shop_name}: {len(items)} items")
+    except FileNotFoundError:
+        print(f"⚠️ shops.json not found at {shop_file}")
+        print("   Using default shop inventories")
+        # Fallback defaults
+        SHOP_INVENTORIES = {
+            "shop_blacksmith": [
+                {"name": "Longsword", "price": 15, "type": "weapon"},
+                {"name": "Chain Mail", "price": 75, "type": "armor"}
+            ],
+            "shop_general": [
+                {"name": "Rations", "price": 10, "type": "food"},
+                {"name": "Torch", "price": 1, "type": "tool"}
+            ]
+        }
+    except json.JSONDecodeError as e:
+        print(f"❌ Error parsing shops.json: {e}")
+        SHOP_INVENTORIES = {}
+
+
+
 def list_images(folder):
     if not os.path.isdir(folder):
         return []
@@ -318,63 +348,520 @@ class SceneImage:
                    base_w=d.get("base_w"), base_h=d.get("base_h"),
                    img_id=d.get("id"))
 
-# ---------------------------------------------------------------------------
+
+
 # TOKEN CLASS
 # ---------------------------------------------------------------------------
-
 class VTT:
-    def __init__(self, root, npc_mode, vtt_tab):
+    def __init__(self, root, npc_mode, parent, canvas):
         self.root = root
         self.npc_mode = npc_mode
-        self.vtt_tab = vtt_tab
-
-        self.state = {
-            "tokens": []
-        }
-        self.state["tokens"] = []
-    def get_token_by_name(self, name):
-
-        for token in self.state["tokens"]:
-            print("INSIDE LOOP:", token)
-
-            if token["name"] == name:
-                return token
-
-        return None
-    def process_npc_gambits(self, name, npc):
-
-        gambits = npc.get("gambits", [])
-
-        for gambit in gambits:
-
-            if gambit == "wander":
-                self.gambit_wander(npc["name"])
-
-            elif gambit == "pause":
-                return
-    def gambit_wander(self, npc_name):
-        token = self.get_token_by_name(npc_name)
-
+        self.parent = parent
+        self.canvas = canvas
+        self.state = None
+        self.tokens = []
+        self.get_gold_cp = None
+        self.deduct_gold_cp = None
+        self.add_gold_cp = None
+        self.setup_bindings()
+    def set_add_to_backpack_callback(self, callback):
+        """Set callback function to add items to equipment tab backpack."""
+        self.add_to_backpack_callback = callback
+        print("✅ Backpack callback registered in VTT")
+    def set_wallet_functions(self, get_func, deduct_func, add_func):
+        """Set wallet callback functions."""
+        self.get_gold_cp = get_func
+        self.deduct_gold_cp = deduct_func
+        self.add_gold_cp = add_func
+    def setup_bindings(self):
+        """Set up keyboard bindings for the VTT canvas."""
+        # Bind 'E' key to interact with selected token
+        self.canvas.bind("<e>", lambda e: self.interact_with_selected_token())
+        self.canvas.bind("<E>", lambda e: self.interact_with_selected_token())
+        # Optional: Bind 'I' for initiative, 'R' for roll, etc.
+        # self.canvas.bind("<i>", lambda e: self.roll_initiative())
+    def interact_with_token(self, token):
+        """Handle player interacting with an NPC (right-click or 'E' key)."""
         if not token:
             return
+        
+        # Check if NPC has shop capability
+        if hasattr(token, 'shop_inventory') and token.shop_inventory:
+            self.open_shop(token)
+        elif hasattr(token, 'gambits') and any("talk" in g.lower() for g in token.gambits):
+            self.show_dialogue(token)
+        else:
+            messagebox.showinfo(f"{token.label}", f"You greet {token.label}.\nThey have nothing to say.")
+    def interact_with_selected_token(self):
+        """Interact with the currently selected token."""
+        if hasattr(self.canvas, 'selected_token') and self.canvas.selected_token:
+            self.interact_with_token(self.canvas.selected_token)
+        else:
+            messagebox.showinfo("No Target", "Select an NPC first (click on them).")
+            
+    def set_state(self, state):
+        """Link to VTT state dict."""
+        self.state = state
+    
+    def get_cell_px(self):
+        """Get current cell size from state."""
+        if self.state:
+            return self.state.get("cell_px", 30)
+        return 30
+    
+    def get_token_by_name(self, name):
+        
+        if self.state:
+            for i, token in enumerate(self.state.get("tokens", [])):
+                #print(f"   Token {i}: label='{token.label}', name='{getattr(token, 'name', '?')}'")
+                if token.label == name or getattr(token, 'name', '') == name:
+                   # print(f"✅ Found: {token.label}")
+                    return token
+        
+       # print(f"⚠️ Could not find token: {name}")
+        return None
+    def create_token_from_npc(self, npc_data, col=None, row=None):
+        import random
+        
+        if col is None:
+            col = random.randint(5, 15)
+        if row is None:
+            row = random.randint(5, 15)
+        
+        cell_px = self.get_cell_px()
+        
+        # Use .get() with defaults for all fields
+        hp_value = npc_data.get("hp", 10)
+        max_hp_value = npc_data.get("max_hp", hp_value)
+        
+        token = Token(
+            canvas=self.canvas,
+            col=col,
+            row=row,
+            cell_px=cell_px,
+            label=npc_data.get("name", "Unknown"),
+            color="#e74c3c",
+            hp=hp_value,
+            token_type="enemy"
+        )
+        
+        # Set all attributes safely
+        token.max_hp = max_hp_value
+        token.ac = npc_data.get("ac", 10)
+        token.speed_val = npc_data.get("speed", 30)
+        token.stats = npc_data.get("stats", {})
+        token.gambits = npc_data.get("gambits", [])
+        token.is_npc = True
+        token.shop_inventory = npc_data.get("shop_inventory", "")
+        token.shop_greeting = npc_data.get("shop_greeting", "Khajiit has wares if you have coin!")
+        
+        # Add to state
+        if self.state:
+            self.state["tokens"].append(token)
+        
+        # Add health bar
+        self._add_health_bar_to_token(token, token.hp, token.max_hp)
+        
+        self.redraw_all()
+        
+        print(f"✅ Spawned '{token.label}' - HP: {token.hp}/{token.max_hp}")
+        return token
+        self.canvas.tag_bind(token.oval, "<Button-3>", lambda e: self.interact_with_token(token))
 
+###### GAMBITS
+
+    def process_npc_gambits(self, name, npc):
+        gambits = npc.get("gambits", [])
+        
+        for gambit in gambits:
+            gambit_lower = gambit.lower()
+            
+            # Match gambit names (case-insensitive)
+            if "wander" in gambit_lower:
+                self.gambit_wander(name)
+            elif "pause" in gambit_lower:
+                pass  # Do nothing
+            elif "attack" in gambit_lower and "adjacent" in gambit_lower:
+                self.gambit_attack_if_adjacent(name)
+            elif "flee" in gambit_lower and "low hp" in gambit_lower:
+                self.gambit_flee_if_low_hp(name)
+            elif "patrol" in gambit_lower:
+                self.gambit_patrol(name)
+            elif "defend" in gambit_lower:
+                self.gambit_defend_ally(name)
+            elif "shop" in gambit_lower:
+                # Shop gambit doesn't auto-trigger — it's player-initiated
+                # We'll handle it via interaction instead
+                pass
+    def gambit_attack_if_adjacent(self, npc_name):
+        """Attack if adjacent to any player token."""
+        token = self.get_token_by_name(npc_name)
+        if not token:
+            #print(f"⚠️ Could not find token: {npc_name}")
+            return
+        
+        print(f"🔍 {npc_name} checking for adjacent players...")
+        
+        # Check adjacent cells for player tokens
+        for other in self.state["tokens"]:
+            if other.token_type == "player":
+                # Check if adjacent (including diagonals)
+                if abs(token.grid_col - other.grid_col) <= 1 and \
+                abs(token.grid_row - other.grid_row) <= 1:
+                    print(f"⚔️ {npc_name} attacks {other.label}!")
+                    # Add damage logic here
+                    return
+
+    def gambit_flee_if_low_hp(self, npc_name):
+        """Flee away from nearest player if HP below 30%."""
+        token = self.get_token_by_name(npc_name)
+        if not token:
+            return
+        
+        # Get max_hp safely (try multiple sources)
+        max_hp = getattr(token, 'max_hp', None)
+        if max_hp is None:
+            # Try to get from token's stats or default to token.hp
+            max_hp = getattr(token, 'hp', 10)
+            print(f"⚠️ {npc_name} missing max_hp, using {max_hp}")
+        
+        hp_percent = token.hp / max_hp if max_hp > 0 else 1
+        
+        if hp_percent > 0.3:
+            return  # Not low enough
+        
+        # Find nearest player
+        nearest = None
+        nearest_dist = float('inf')
+        for other in self.state.get("tokens", []):
+            if other.token_type == "player":
+                dist = abs(token.grid_col - other.grid_col) + abs(token.grid_row - other.grid_row)
+                if dist < nearest_dist:
+                    nearest_dist = dist
+                    nearest = other
+        
+        if nearest:
+            # Flee away
+            dx = token.grid_col - nearest.grid_col
+            dy = token.grid_row - nearest.grid_row
+            
+            if dx != 0:
+                dx = 1 if dx > 0 else -1
+            if dy != 0:
+                dy = 1 if dy > 0 else -1
+            
+            new_col = token.grid_col + dx
+            new_row = token.grid_row + dy
+            
+            self._try_move_token(token, new_col, new_row)
+            print(f"💨 {npc_name} flees from {nearest.label}!")
+    def gambit_patrol(self, npc_name):
+        """Patrol — wander with lower frequency."""
+        if random.random() < 0.3:  # 30% chance
+            self.gambit_wander(npc_name)
+    def gambit_defend_ally(self, npc_name):
+        """Move toward nearest ally."""
+        token = self.get_token_by_name(npc_name)
+        if not token:
+            return
+        
+        # Find nearest ally (same token_type)
+        nearest_ally = None
+        nearest_dist = float('inf')
+        for other in self.state["tokens"]:
+            if other is token:
+                continue
+            if other.token_type == token.token_type:
+                dist = abs(token.grid_col - other.grid_col) + abs(token.grid_row - other.grid_row)
+                if dist < nearest_dist:
+                    nearest_dist = dist
+                    nearest_ally = other
+        
+        if nearest_ally and nearest_dist > 2:
+            dx = 0
+            dy = 0
+            if nearest_ally.grid_col > token.grid_col:
+                dx = 1
+            elif nearest_ally.grid_col < token.grid_col:
+                dx = -1
+            
+            if nearest_ally.grid_row > token.grid_row:
+                dy = 1
+            elif nearest_ally.grid_row < token.grid_row:
+                dy = -1
+            
+            new_col = token.grid_col + dx
+            new_row = token.grid_row + dy
+            self._try_move_token(token, new_col, new_row)
+            print(f"🛡️ {npc_name} moves toward ally {nearest_ally.label}")
+
+    def _try_move_token(self, token, new_col, new_row):
+        """Attempt to move token to new grid position."""
+        # Check bounds
+        if new_col < 0 or new_row < 0:
+            return
+        
+        # Check collision with walls
+        coord = f"{col_to_letters(new_col)}{new_row + 1}"
+        ctype = self.canvas.mapstate.get(coord, "")
+        if CELL_TYPES.get(ctype, {}).get("collision", False):
+            return
+        
+        # Update token position
+        token.grid_col = new_col
+        token.grid_row = new_row
+        
+        # Move on canvas
+        cell_px = self.state.get("cell_px", 30)
+        if hasattr(self.canvas, '_zoom'):
+            cell_px = int(cell_px * self.canvas._zoom)
+        
+        token.move_to(cell_px)
+        
+        # Redraw if needed
+        if hasattr(self.canvas, '_redraw_fn'):
+            self.canvas._redraw_fn()
+        # Push updated position to Google Sheets
+        push_tokens_to_sheet(self.state["tokens"])
+
+    def gambit_wander(self, npc_name):
+        token = self.get_token_by_name(npc_name)
+        if not token:
+            return
+        
+        # Random direction
         dx = random.choice([-1, 0, 1])
         dy = random.choice([-1, 0, 1])
+        
+        if dx == 0 and dy == 0:
+            return
+        
+        new_col = token.grid_col + dx
+        new_row = token.grid_row + dy
+        
+        self._try_move_token(token, new_col, new_row)
 
-        move_amount = 10
+    # ----# SHOP HELPERS--------------------------------------------------------------
 
-        self.canvas.move(
-            token.id,
-            dx * move_amount,
-            dy * move_amount
-        )
-    def npc_ai_tick(self):
+    def show_dialogue(self, npc_token, player_token):
+        """Show dialogue window for NPC."""
+        win = tk.Toplevel(self.root)
+        win.title(f"Talk to {npc_token.label}")
+        win.geometry("400x350")
+        win.grab_set()
+        
+        # Get dialogue from NPC (or use default)
+        dialogue = getattr(npc_token, 'dialogue', {})
+        greeting = dialogue.get("greeting", f"Hello, I'm {npc_token.label}.")
+        options = dialogue.get("options", ["Goodbye"])
+        
+        # Text area
+        text_area = tk.Text(win, wrap="word", height=8, font=("Arial", 11))
+        text_area.pack(fill="both", expand=True, padx=10, pady=10)
+        text_area.insert("1.0", greeting)
+        text_area.config(state="disabled")
+        
+        # Buttons for options
+        for opt in options:
+            btn = tk.Button(win, text=opt, width=30,
+                        command=lambda o=opt: self.dialogue_choice(npc_token, o, win))
+            btn.pack(pady=2)
+        
+        # Shop button if merchant
+        if getattr(npc_token, 'role', '') == "merchant":
+            tk.Button(win, text="🛒 Open Shop", bg="#27ae60", fg="white",
+                    command=lambda: self.open_shop(npc_token)).pack(pady=5)
+    def dialogue_choice(self, npc_token, choice, window):
+        """Handle dialogue option selection."""
+        if choice == "Goodbye":
+            window.destroy()
+        elif choice == "Browse wares":
+            self.open_shop(npc_token)
+        else:
+            # Custom response
+            response = getattr(npc_token, 'dialogue', {}).get(choice, "I don't understand.")
+            for widget in window.winfo_children():
+                if isinstance(widget, tk.Text):
+                    widget.config(state="normal")
+                    widget.insert("end", f"\n\n{response}")
+                    widget.config(state="disabled")
+                    widget.see("end")
+    def open_shop(self, npc_token):
+        """Open shop interface for merchant NPC."""
+        global SHOP_INVENTORIES
+        
+        inventory_ref = getattr(npc_token, 'shop_inventory', None)
+        greeting = getattr(npc_token, 'shop_greeting', "Welcome to my shop!")
+        
+        if not inventory_ref:
+            messagebox.showinfo("No Shop", f"{npc_token.label} has nothing to sell.")
+            return
+        
+        items = SHOP_INVENTORIES.get(inventory_ref, [])
+        if not items:
+            messagebox.showinfo("Empty Shop", f"{npc_token.label}'s shop is empty.")
+            return
+        
+        # Create shop window
+        win = tk.Toplevel(self.root)
+        win.title(f"{npc_token.label}'s Shop")
+        win.geometry("550x500")
+        win.grab_set()
+        
+        # Greeting
+        tk.Label(win, text=greeting, font=("Arial", 10, "italic"), fg="#aaa").pack(pady=10)
+        
+        # Get player's gold (in copper pieces)
+        player_gold_cp = self.get_gold_cp() if self.get_gold_cp else 0
+        player_gold_gp = player_gold_cp // 100  # Convert to GP for display
+        
+        # Gold display
+        gold_frame = tk.Frame(win)
+        gold_frame.pack(fill="x", padx=10, pady=5)
+        gold_label = tk.Label(gold_frame, text=f"💰 Your Gold: {player_gold_gp} GP", 
+                            font=("Arial", 10, "bold"), fg="#f1c40f")
+        gold_label.pack(side="left")
+        
+        # Separator
+        ttk.Separator(win, orient="horizontal").pack(fill="x", padx=10, pady=5)
+        
+        # Scrollable area for items
+        canvas = tk.Canvas(win, highlightthickness=0)
+        scrollbar = tk.Scrollbar(win, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas)
+        
+        scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True, padx=10, pady=5)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Display items
+        for item in items:
+            item_frame = tk.Frame(scrollable_frame)
+            item_frame.pack(fill="x", pady=3)
+            
+            # Item name
+            name = item.get("name", "Unknown")
+            tk.Label(item_frame, text=name, width=25, anchor="w").pack(side="left")
+            
+            # Item type (optional)
+            item_type = item.get("type", "")
+            if item_type:
+                tk.Label(item_frame, text=f"[{item_type}]", fg="gray", width=10, anchor="w").pack(side="left")
+            
+            # Price (convert from copper to GP for display)
+            price_cp = item.get("price_cp", 0)
+            if price_cp == 0:
+                # Try to parse price string if it exists
+                price_str = item.get("price", "")
+                if price_str:
+                    price_cp = self.parse_cost_to_cp(price_str)
+            price_gp = price_cp // 100
+            price_label = tk.Label(item_frame, text=f"{price_gp} GP", width=8, anchor="w", fg="#f1c40f")
+            price_label.pack(side="left")
+            
+            # Buy button
+            buy_btn = tk.Button(item_frame, text="Buy", 
+                            command=lambda i=item, p=price_cp: self.buy_item(i, p, win, gold_label),
+                            bg="#27ae60", fg="white", width=6)
+            buy_btn.pack(side="left", padx=5)
+        
+        # Close button
+        tk.Button(win, text="Close", command=win.destroy, bg="#555", fg="white", width=15).pack(pady=10)
 
-        npc_dict = self.npc_mode.get_npcs()
+    def buy_item(self, item, price_cp, shop_window, gold_label):
+        """Handle purchasing an item."""
+        if not self.get_gold_cp or not self.deduct_gold_cp:
+            messagebox.showinfo("Error", "Wallet system not connected.")
+            return
+        
+        player_gold_cp = self.get_gold_cp()
+        
+        if player_gold_cp >= price_cp:
+            # Deduct gold
+            new_gold_cp = self.deduct_gold_cp(price_cp)
+            new_gold_gp = new_gold_cp // 100
+            
+            # Update gold display
+            gold_label.config(text=f"💰 Your Gold: {new_gold_gp} GP")
+            
+            # Add to player inventory (you'll implement this)
+            self.add_to_player_inventory(item)
+            
+            messagebox.showinfo("Purchased", f"You bought {item['name']} for {price_cp // 100} GP!")
+        else:
+            short = (price_cp - player_gold_cp) // 100 + 1
+            messagebox.showwarning("Not Enough Gold", f"You need {short} more GP to buy {item['name']}.")
 
-        for name, npc in npc_dict.items():
-            self.process_npc_gambits(name, npc)
-        self.root.after(1000, self.npc_ai_tick)
+    def parse_cost_to_cp(self, cost_text):
+        """Convert cost string (e.g., '15 GP') to copper pieces."""
+        import re
+        match = re.match(r"(\d+(?:\.\d+)?)\s*(\w+)", str(cost_text).strip())
+        if match:
+            amount = float(match.group(1))
+            coin = match.group(2).upper()
+            coin_values = {"PP": 1000, "GP": 100, "EP": 50, "SP": 10, "CP": 1}
+            return int(amount * coin_values.get(coin, 1))
+        return 0
+
+    def add_to_player_inventory(self, item):
+        """Add purchased item to player's inventory (Equipment tab backpack)."""
+        import sys
+        import os
+        import tkinter as tk
+        
+        item_name = item.get("name", "Unknown Item")
+        if hasattr(self, 'add_to_backpack_callback') and self.add_to_backpack_callback:
+            self.add_to_backpack_callback(item_name)
+            print(f"✅ Sent '{item_name}' to backpack via callback")
+        else:
+            print(f"⚠️ No backpack callback set. Item not added: {item_name}")
+        # Try to import the global backpack items and refresh function
+        try:
+            # Add Tracker directory to path if needed
+            tracker_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if tracker_dir not in sys.path:
+                sys.path.insert(0, tracker_dir)
+            
+            from Tracker import backpack_items_global, refresh_backpack_func
+            
+            # Add to backpack
+            backpack_items_global.append(item_name)
+            
+            # Refresh the display
+            if refresh_backpack_func:
+                refresh_backpack_func()
+            
+            print(f"✅ Added '{item_name}' to backpack")
+        except Exception as e:
+            print(f"⚠️ Could not add to backpack: {e}")
+            # Fallback: just print
+            print(f"Added to inventory (no backpack connection): {item_name}")
+        def buy_item(self, item, price_cp, shop_window, gold_label):
+            """Handle purchasing an item."""
+            if not self.get_gold_cp or not self.deduct_gold_cp:
+                messagebox.showinfo("Error", "Wallet system not connected.")
+                return
+            
+            player_gold_cp = self.get_gold_cp()
+            
+            if player_gold_cp >= price_cp:
+                # Deduct gold
+                new_gold_cp = self.deduct_gold_cp(price_cp)
+                new_gold_gp = new_gold_cp // 100
+                
+                # Update gold display
+                gold_label.config(text=f"💰 Your Gold: {new_gold_gp} GP")
+                
+                # Add to player inventory (THIS IS THE KEY LINE)
+                self.add_to_player_inventory(item)  # ← Calls the callback
+                
+                messagebox.showinfo("Purchased", f"You bought {item['name']} for {price_cp // 100} GP!")
+            else:
+                short = (price_cp - player_gold_cp) // 100 + 1
+                messagebox.showwarning("Not Enough Gold", f"You need {short} more GP to buy {item['name']}.")
 
     def update_token_position(self, name, x, y):
 
@@ -392,6 +879,134 @@ class VTT:
 
         token["x"] = x
         token["y"] = y
+
+    def get_current_cell_size(self):
+        """Get current cell size from VTT state."""
+        # Access the state from your VTT canvas
+        if hasattr(self.canvas, '_redraw_fn'):
+            # Try to get from canvas's parent/state
+            pass
+        
+        # Fallback: get from your VTT's state dict
+        # You may need to store state as self.state
+        if hasattr(self, 'state'):
+            return self.state.get("cell_px", 30)
+        
+        return 30  # Default
+    def _add_health_bar_to_token(self, token, current_hp, max_hp):
+        """Add a health bar above the token."""
+        x = token.grid_col * token.cell_px
+        y = token.grid_row * token.cell_px
+        bar_width = token.cell_px
+        bar_height = 6
+        bar_x = x
+        bar_y = y - 12
+        
+        percent = current_hp / max_hp if max_hp > 0 else 0
+        
+        if percent > 0.6:
+            color = "#2ecc71"
+        elif percent > 0.3:
+            color = "#f1c40f"
+        else:
+            color = "#e74c3c"
+        
+        # Store health bar IDs on token for later updates
+        token.health_bg = self.canvas.create_rectangle(
+            bar_x, bar_y, bar_x + bar_width, bar_y + bar_height,
+            fill="#333333", outline="black", width=1,
+            tags=("token_layer", f"hp_{token.label}")
+        )
+        
+        token.health_fill = self.canvas.create_rectangle(
+            bar_x, bar_y, bar_x + (bar_width * percent), bar_y + bar_height,
+            fill=color, outline="",
+            tags=("token_layer", f"hp_{token.label}")
+        )
+
+    def update_token_health(self, token_name, new_hp):
+        """Update token's HP and refresh health bar."""
+        token = self.get_token_by_name(token_name)
+        if not token:
+            return False
+        
+        token.hp = max(0, min(new_hp, token.max_hp))
+        
+        # Update token's text label
+        token._update_text()
+        
+        # Update health bar if it exists
+        if hasattr(token, 'health_fill'):
+            x = token.grid_col * token.cell_px
+            bar_width = token.cell_px
+            percent = token.hp / token.max_hp if token.max_hp > 0 else 0
+            
+            # Delete old fill and recreate
+            self.canvas.delete(token.health_fill)
+            
+            if percent > 0.6:
+                color = "#2ecc71"
+            elif percent > 0.3:
+                color = "#f1c40f"
+            else:
+                color = "#e74c3c"
+            
+            token.health_fill = self.canvas.create_rectangle(
+                x, token.grid_row * token.cell_px - 12,
+                x + (bar_width * percent), token.grid_row * token.cell_px - 6,
+                fill=color, outline="",
+                tags=("token_layer", f"hp_{token.label}")
+            )
+        
+        # If dead, remove token
+        if token.hp <= 0:
+            self.remove_token(token_name)
+        
+        return True
+    def remove_token(self, token_name):
+        """Remove token from canvas and state."""
+        token = self.get_token_by_name(token_name)
+        if token:
+            self.canvas.delete(token.oval)
+            self.canvas.delete(token.text)
+            if hasattr(token, 'health_bg'):
+                self.canvas.delete(token.health_bg)
+                self.canvas.delete(token.health_fill)
+            del self.state["tokens"][token_name]
+            return True
+        return False
+
+    def npc_ai_tick(self):
+        """Run AI for all NPCs every second."""
+        if self.npc_mode is None:
+            self.root.after(1000, self.npc_ai_tick)
+            return
+        try:
+            npc_dict = self.npc_mode.get_npcs()
+            for name, npc in npc_dict.items():
+                self.process_npc_gambits(name, npc)
+        except Exception as e:
+            print(f"AI Tick Error: {e}")
+        self.root.after(1000, self.npc_ai_tick)
+    def stop_ai_tick(self):
+        self._running = False
+    def refresh(self):
+        pass
+    def redraw_all(self):
+        """Trigger full redraw of VTT canvas."""
+        if hasattr(self.canvas, '_redraw_fn'):
+            self.canvas._redraw_fn()
+        else:
+            print("⚠️ No redraw function found on canvas - trying fallback")
+            # Fallback: try to force redraw through state
+            if hasattr(self, 'state') and self.state:
+                # Force a simple redraw of tokens
+                for token in self.state.get("tokens", []):
+                    cell_px = self.state.get("cell_px", 30)
+                    token.move_to(cell_px)
+
+
+
 class Token:
     def __init__(self, canvas, col, row, cell_px, label="Token",
                  color="#e74c3c", img_path=None, speed=6,
@@ -1037,10 +1652,8 @@ def load_vtt_state(state, vtt_canvas, redraw_fn):
 # MAIN BUILD FUNCTION
 # ---------------------------------------------------------------------------
 
-def build_vtt_tab(parent):
-
-    # -----------------------------------------------------------------------
-    # STATE
+def build_vtt_tab(parent, npc_mode):
+    load_shops()    # STATE
     # -----------------------------------------------------------------------
     state = {
         "cell_px":          30,
@@ -1073,126 +1686,7 @@ def build_vtt_tab(parent):
     canvas_frame = tk.Frame(parent)
     canvas_frame.pack(fill="both", expand=True)
 
-    vtt_canvas = tk.Canvas(canvas_frame, bg="#1a1a2e", cursor="crosshair")
-    vtt_canvas.pack(fill="both", expand=True)
-    vtt_canvas.mapstate   = {}
-    vtt_canvas.paint_mode = False
-    vtt_canvas._zoom      = 1.0
-
-    def _layer_unlocked(layer):
-        return not state.get(f"lock_{layer}", False)
-    vtt_canvas._layer_unlocked = _layer_unlocked
-
-    h_scroll = tk.Scrollbar(canvas_frame, orient="horizontal",
-                             command=vtt_canvas.xview)
-    v_scroll = tk.Scrollbar(canvas_frame, orient="vertical",
-                             command=vtt_canvas.yview)
-    vtt_canvas.config(xscrollcommand=h_scroll.set,
-                      yscrollcommand=v_scroll.set)
-    h_scroll.pack(side="bottom", fill="x")
-    v_scroll.pack(side="right",  fill="y")
-
-    # -----------------------------------------------------------------------
-    # FLOATING SIDE PANEL
-    # -----------------------------------------------------------------------
-    PANEL_W = 190
-    panel = tk.Frame(canvas_frame, bg="#1e1e2e", width=PANEL_W,
-                     relief="flat", bd=0)
-    panel.place(x=0, y=0, width=PANEL_W, relheight=1.0)
-    panel.pack_propagate(False)
-
-    pc = tk.Canvas(panel, bg="#1e1e2e", highlightthickness=0,
-                   width=PANEL_W-16)
-    ps = tk.Scrollbar(panel, orient="vertical", command=pc.yview)
-    pc.config(yscrollcommand=ps.set)
-    ps.pack(side="right", fill="y")
-    pc.pack(side="left",  fill="both", expand=True)
-
-    inner = tk.Frame(pc, bg="#1e1e2e")
-    iw    = pc.create_window((0, 0), window=inner, anchor="nw")
-    inner.bind("<Configure>",
-               lambda e: pc.config(scrollregion=pc.bbox("all")))
-    pc.bind("<Configure>",
-            lambda e: pc.itemconfig(iw, width=e.width))
-
-    def psw(e):
-        pc.yview_scroll(-1 if e.delta > 0 else 1, "units")
-    pc.bind("<MouseWheel>",    psw)
-    inner.bind("<MouseWheel>", psw)
-
-    panel_visible = [True]
-    toggle_btn = tk.Button(canvas_frame, text="◄",
-                           font=("Arial", 8, "bold"),
-                           bg="#2c3e50", fg="white",
-                           relief="flat", cursor="hand2")
-    toggle_btn.place(x=PANEL_W, y=0, width=16, relheight=0.06)
-
-    def toggle_panel():
-        if panel_visible[0]:
-            panel.place_forget()
-            toggle_btn.place(x=0, y=0, width=16, relheight=0.06)
-            toggle_btn.config(text="►")
-        else:
-            panel.place(x=0, y=0, width=PANEL_W, relheight=1.0)
-            toggle_btn.place(x=PANEL_W, y=0, width=16, relheight=0.06)
-            toggle_btn.config(text="◄")
-        panel_visible[0] = not panel_visible[0]
-    toggle_btn.config(command=toggle_panel)
-
-    # -----------------------------------------------------------------------
-    # PANEL HELPERS
-    # -----------------------------------------------------------------------
-    def make_section(title):
-        hdr = tk.Frame(inner, bg="#2c3e50")
-        hdr.pack(fill="x", pady=(6, 0))
-        lbl = tk.Label(hdr, text=f"▼ {title}", bg="#2c3e50", fg="white",
-                       font=("Arial", 9, "bold"), anchor="w", cursor="hand2")
-        lbl.pack(fill="x", padx=6, pady=3)
-        body = tk.Frame(inner, bg="#1e1e2e")
-        body.pack(fill="x", padx=4, pady=2)
-        col = [False]
-
-        def tog(e=None):
-            if col[0]:
-                body.pack(fill="x", padx=4, pady=2)
-                lbl.config(text=f"▼ {title}")
-            else:
-                body.pack_forget()
-                lbl.config(text=f"► {title}")
-            col[0] = not col[0]
-        lbl.bind("<Button-1>", tog)
-        hdr.bind("<Button-1>", tog)
-        return body
-
-    def pbtn(par, text, cmd, bg="#2c3e50", fg="white"):
-        tk.Button(par, text=text, command=cmd, bg=bg, fg=fg,
-                  font=("Arial", 8), relief="flat", cursor="hand2",
-                  anchor="w", padx=6).pack(fill="x", pady=1)
-
-    def psep(par):
-        ttk.Separator(par, orient="horizontal").pack(fill="x", pady=4)
-
-    # -----------------------------------------------------------------------
-    # ZOOM
-    # -----------------------------------------------------------------------
-    zoom_level = [1.0]
-
-    def zoom(factor):
-        nz = zoom_level[0] * factor
-        if not (0.1 <= nz <= 8.0): return
-        zoom_level[0] = nz
-        vtt_canvas._zoom = nz
-        redraw_all()
-
-    def reset_zoom():
-        zoom_level[0] = 1.0
-        vtt_canvas._zoom = 1.0
-        redraw_all()
-
-    vtt_canvas.bind("<MouseWheel>",
-                    lambda e: zoom(1.1 if e.delta > 0 else 0.9))
-
-    # -----------------------------------------------------------------------
+# -----------------------------------------------------------------------
     # REDRAW ALL
     # -----------------------------------------------------------------------
     def redraw_all():
@@ -1352,8 +1846,133 @@ def build_vtt_tab(parent):
         vtt_canvas.tag_raise("darkness_layer")   # ← add this
         vtt_canvas.tag_raise("token_layer")
 
-    vtt_canvas._redraw_fn = redraw_all
 
+
+    vtt_canvas = tk.Canvas(canvas_frame, bg="#1a1a2e", cursor="crosshair")
+    vtt_canvas.pack(fill="both", expand=True)
+    vtt_canvas.mapstate   = {}
+    vtt_canvas.paint_mode = False
+    vtt_canvas._zoom      = 1.0
+    vtt_canvas._redraw_fn = redraw_all
+    root = parent.winfo_toplevel()
+    vtt_instance = VTT(root, npc_mode, parent, vtt_canvas)
+    vtt_instance.state = state
+    vtt_instance.tokens = state["tokens"]
+
+    def _layer_unlocked(layer):
+        return not state.get(f"lock_{layer}", False)
+    vtt_canvas._layer_unlocked = _layer_unlocked
+
+    h_scroll = tk.Scrollbar(canvas_frame, orient="horizontal",
+                             command=vtt_canvas.xview)
+    v_scroll = tk.Scrollbar(canvas_frame, orient="vertical",
+                             command=vtt_canvas.yview)
+    vtt_canvas.config(xscrollcommand=h_scroll.set,
+                      yscrollcommand=v_scroll.set)
+    h_scroll.pack(side="bottom", fill="x")
+    v_scroll.pack(side="right",  fill="y")
+
+    # -----------------------------------------------------------------------
+    # FLOATING SIDE PANEL
+    # -----------------------------------------------------------------------
+    PANEL_W = 190
+    panel = tk.Frame(canvas_frame, bg="#1e1e2e", width=PANEL_W,
+                     relief="flat", bd=0)
+    panel.place(x=0, y=0, width=PANEL_W, relheight=1.0)
+    panel.pack_propagate(False)
+
+    pc = tk.Canvas(panel, bg="#1e1e2e", highlightthickness=0,
+                   width=PANEL_W-16)
+    ps = tk.Scrollbar(panel, orient="vertical", command=pc.yview)
+    pc.config(yscrollcommand=ps.set)
+    ps.pack(side="right", fill="y")
+    pc.pack(side="left",  fill="both", expand=True)
+
+    inner = tk.Frame(pc, bg="#1e1e2e")
+    iw    = pc.create_window((0, 0), window=inner, anchor="nw")
+    inner.bind("<Configure>",
+               lambda e: pc.config(scrollregion=pc.bbox("all")))
+    pc.bind("<Configure>",
+            lambda e: pc.itemconfig(iw, width=e.width))
+
+    def psw(e):
+        pc.yview_scroll(-1 if e.delta > 0 else 1, "units")
+    pc.bind("<MouseWheel>",    psw)
+    inner.bind("<MouseWheel>", psw)
+
+    panel_visible = [True]
+    toggle_btn = tk.Button(canvas_frame, text="◄",
+                           font=("Arial", 8, "bold"),
+                           bg="#2c3e50", fg="white",
+                           relief="flat", cursor="hand2")
+    toggle_btn.place(x=PANEL_W, y=0, width=16, relheight=0.06)
+
+    def toggle_panel():
+        if panel_visible[0]:
+            panel.place_forget()
+            toggle_btn.place(x=0, y=0, width=16, relheight=0.06)
+            toggle_btn.config(text="►")
+        else:
+            panel.place(x=0, y=0, width=PANEL_W, relheight=1.0)
+            toggle_btn.place(x=PANEL_W, y=0, width=16, relheight=0.06)
+            toggle_btn.config(text="◄")
+        panel_visible[0] = not panel_visible[0]
+    toggle_btn.config(command=toggle_panel)
+
+    # -----------------------------------------------------------------------
+    # PANEL HELPERS
+    # -----------------------------------------------------------------------
+    def make_section(title):
+        hdr = tk.Frame(inner, bg="#2c3e50")
+        hdr.pack(fill="x", pady=(6, 0))
+        lbl = tk.Label(hdr, text=f"▼ {title}", bg="#2c3e50", fg="white",
+                       font=("Arial", 9, "bold"), anchor="w", cursor="hand2")
+        lbl.pack(fill="x", padx=6, pady=3)
+        body = tk.Frame(inner, bg="#1e1e2e")
+        body.pack(fill="x", padx=4, pady=2)
+        col = [False]
+
+        def tog(e=None):
+            if col[0]:
+                body.pack(fill="x", padx=4, pady=2)
+                lbl.config(text=f"▼ {title}")
+            else:
+                body.pack_forget()
+                lbl.config(text=f"► {title}")
+            col[0] = not col[0]
+        lbl.bind("<Button-1>", tog)
+        hdr.bind("<Button-1>", tog)
+        return body
+
+    def pbtn(par, text, cmd, bg="#2c3e50", fg="white"):
+        tk.Button(par, text=text, command=cmd, bg=bg, fg=fg,
+                  font=("Arial", 8), relief="flat", cursor="hand2",
+                  anchor="w", padx=6).pack(fill="x", pady=1)
+
+    def psep(par):
+        ttk.Separator(par, orient="horizontal").pack(fill="x", pady=4)
+
+    # -----------------------------------------------------------------------
+    # ZOOM
+    # -----------------------------------------------------------------------
+    zoom_level = [1.0]
+
+    def zoom(factor):
+        nz = zoom_level[0] * factor
+        if not (0.1 <= nz <= 8.0): return
+        zoom_level[0] = nz
+        vtt_canvas._zoom = nz
+        redraw_all()
+
+    def reset_zoom():
+        zoom_level[0] = 1.0
+        vtt_canvas._zoom = 1.0
+        redraw_all()
+
+    vtt_canvas.bind("<MouseWheel>",
+                    lambda e: zoom(1.1 if e.delta > 0 else 0.9))
+
+    
     # -----------------------------------------------------------------------
     # COORDINATE DISPLAY
     # -----------------------------------------------------------------------
@@ -2118,8 +2737,7 @@ def build_vtt_tab(parent):
     vtt_canvas.bind("<B2-Motion>",
                     lambda e: vtt_canvas.scan_dragto(e.x, e.y, gain=1))
 
-    # -----------------------------------------------------------------------
     # INITIAL DRAW
-    # -----------------------------------------------------------------------
-    
-    parent.after(100, redraw_all)
+    parent.after(100, lambda: redraw_all())
+    #print("✅ build_vtt_tab completed, UI built successfully")
+    return vtt_instance, vtt_canvas
