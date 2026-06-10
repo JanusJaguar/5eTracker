@@ -10,6 +10,7 @@ import random
 import winsound
 from vtt import build_vtt_tab
 from vtt_player import build_player_vtt_tab
+from vtt import VTT
 from npc_mode import NPCMode
 from minigames import SimTowerApp
 from notes import build_notes_tab
@@ -28,6 +29,20 @@ except:
     pass
 BASE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)))
 
+sheet_tab = None
+spells_tab = None
+equipment_tab = None
+feats_tab = None
+vtt_tab = None
+npc_tab = None
+vtt_instance = None  
+player_vtt_built = True  
+vtt_canvas_ref = None
+global_refs = {
+    "backpack_listbox": None,
+    "equipped_listbox": None,
+}
+add_to_backpack_callback = None
 def get_sheets_client():
     import gspread
     from google.oauth2.service_account import Credentials
@@ -108,6 +123,29 @@ COLUMN_LABELS = {
         "Cost": "Cost"
     }
 }
+
+CANTRIP_COL = {
+"Artificer": "Artificer_Cantrips",
+"Bard":      "Bard_Cantrips",
+"Cleric":    "Cleric_Cantrips",
+"Druid":     "Druid_Cantrips",
+"Fighter":   "Fighter_Cantrips",
+"Rogue":     "Rogue_Cantrips",
+"Sorcerer":  "Sorcerer_Cantrips",
+"Warlock":   "Warlock_Cantrips",
+"Wizard":    "Wizard_Cantrips",
+}
+SPELLS_COL = {
+    "Artificer": "Artificer_Spells",
+    "Bard":      "Bard_Spells",
+    "Fighter":   "Fighter_Spells",
+    "Ranger":    "Ranger_Spells",
+    "Rogue":     "Rogue_Spells",
+    "Sorcerer":  "Sorcerer_Spells",
+    "Warlock":   "Warlock_Spells",
+    "Monk":      "Ki_Points",
+}
+
 COIN_VALUES = {
     "PP": 1000,
     "GP": 100,
@@ -154,7 +192,6 @@ ARMOR_STYLE = {
     "Plate": "Heavy",
     "Shield": "Off-Hand",
 }
-
 spell_slot_vars = {}
 spell_slot_labels = {}
 npc_list = []
@@ -209,21 +246,12 @@ def load_excel_data():
 
         class_info = {}
         for _, row in class_info_raw.iterrows():
-            sa = str(row["Spellcasting Ability"]).strip()
+            sa  = str(row["Spellcasting Ability"]).strip()
+            ct  = str(row.get("Caster_Type", "")).strip()
             class_info[row["Class"]] = {
-
-                "spell_ability":
-                    sa if sa not in ("nan", "ALL") else "—",
-
-                "hit_die":
-                    str(row["Hit Die"]).strip()
-                    if pd.notna(row["Hit Die"])
-                    else "—",
-
-                "caster_type":
-                    str(row["Caster_Type"]).strip()
-                    if pd.notna(row["Caster_Type"])
-                    else "None",
+                "spell_ability": sa if sa not in ("nan", "ALL") else "—",
+                "hit_die":       str(row["Hit Die"]).strip() if pd.notna(row["Hit Die"]) else "—",
+                "caster_type":   ct if ct not in ("nan", "") else "none",
             }
 
         # Manual fixes: subclass-only casters and hit dice corrections
@@ -321,8 +349,7 @@ def load_excel_data():
         )
 
 
-CLASS_INFO, SUBCLASS_MAP, SPELL_DF, ITEM_SHEETS, \
-RACE_LIST, BACKGROUND_LIST, SLOTS_DF, PROG_DF = load_excel_data()
+CLASS_INFO, SUBCLASS_MAP, SPELL_DF, ITEM_SHEETS, RACE_LIST, BACKGROUND_LIST, SLOTS_DF, PROG_DF = load_excel_data()
 
 SKILL_STAT = {
     "Acrobatics":     "DEX",
@@ -344,11 +371,8 @@ SKILL_STAT = {
     "Stealth":        "DEX",
     "Survival":       "WIS",
 }
- 
 ALL_SKILLS = sorted(SKILL_STAT.keys())
- 
 STATS = ["STR", "DEX", "CON", "INT", "WIS", "CHA"]
- 
 STAT_FULL = {
     "STR": "Strength",
     "DEX": "Dexterity",
@@ -370,6 +394,129 @@ equip_listbox = None
 feats_listbox = None
 feats_desc_text = None
 vtt_built = False
+
+
+# LOAD JSON DATA
+
+def load_class_jsons():
+    classes = {}
+
+    class_folder = "Resources/DND5E/classes"
+
+    if not os.path.exists(class_folder):
+        return classes
+
+    for filename in os.listdir(class_folder):
+        if not filename.endswith(".json"):
+            continue
+
+        filepath = os.path.join(class_folder, filename)
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            class_name = data.get("class", "").lower()
+
+            if class_name:
+                classes[class_name] = data
+
+        except Exception as e:
+            print(f"Failed loading {filename}: {e}")
+
+    return classes
+CLASS_JSON = load_class_jsons()
+JSON_FEATS_CACHE = []
+#print("Loaded Classes:")
+#print(CLASS_JSON.keys())
+def get_features_for_character(class_name, subclass_name, level):
+
+    feats = []
+
+    class_data = CLASS_JSON.get(class_name.lower())
+
+    if not class_data:
+        return feats
+
+    for feat in class_data["features"]:
+
+        feat_level = feat.get("level", 0)
+
+        if feat_level > level:
+            continue
+
+        feat_subclass = feat.get("subclass")
+
+        if feat_subclass is None:
+            feats.append(feat)
+
+        elif subclass_name and feat_subclass.lower() == subclass_name.lower():
+            feats.append(feat)
+
+    return sorted(feats, key=lambda x: x["level"])
+
+def get_features_for_character(
+        class_name,
+        subclass_name,
+        level):
+
+    class_name = str(class_name).lower()
+    subclass_name = str(subclass_name).lower()
+
+    class_data = CLASS_JSON.get(class_name)
+
+    if not class_data:
+        return []
+
+    results = []
+
+    for feature in class_data["features"]:
+
+        feature_level = feature.get("level", 0)
+
+        if feature_level > level:
+            continue
+
+        feature_subclass = feature.get("subclass")
+
+        #
+        # Base class feature
+        #
+        if feature_subclass is None:
+            results.append(feature)
+            continue
+
+        #
+        # Matching subclass feature
+        #
+        if str(feature_subclass).lower() == subclass_name:
+            results.append(feature)
+
+    return results
+
+def get_class_features(class_name):
+    class_name = class_name.lower()
+
+    if class_name not in CLASS_JSON:
+        return []
+
+    return CLASS_JSON[class_name].get("features", [])
+def get_feature_display_list(
+        class_name,
+        subclass_name,
+        level):
+
+    features = get_features_for_character(
+        class_name,
+        subclass_name,
+        level
+    )
+
+    return [
+        f"Lv {f['level']} - {f['data']['name']}"
+        for f in features
+    ]
+
 # ---------------------------------------------------------------------------
 # MATH ENGINE
 # ---------------------------------------------------------------------------
@@ -651,6 +798,196 @@ def add_placeholder(widget, text):
 # ---------------------------------------------------------------------------
 # UPDATE FUNCTIONS
 # ---------------------------------------------------------------------------
+def _reset_all_slots():
+    """Reset all spell slot toggles to available (cyan ★)."""
+    for level in range(1, 10):
+        if level not in spell_slot_vars or level not in spell_slot_labels:
+            continue
+        for i, lbl in enumerate(spell_slot_labels[level]):
+            # Only reset slots that actually exist (not invisible ones)
+            if lbl.cget("fg") != "#1e1e2e":
+                if i < len(spell_slot_vars[level]):
+                    spell_slot_vars[level][i] = True
+                lbl.config(fg="cyan", text="★")
+
+def open_rest_popup():
+    """Rest popup — short rest spends hit dice, long rest fully recovers."""
+    win = tk.Toplevel(root)
+    win.title("⛺ Rest")
+    win.geometry("340x460")
+    win.resizable(False, False)
+    win.grab_set()
+
+    tk.Label(win, text="⛺ Take a Rest",
+             font=("Arial", 13, "bold")).pack(pady=(14, 2))
+
+    # Hit dice info
+    cls1  = class1_var.get()
+    cls2  = class2_var.get()
+    try: lvl1 = int(class1_level_var.get() or 0)
+    except: lvl1 = 0
+    try: lvl2 = int(class2_level_var.get() or 0)
+    except: lvl2 = 0
+
+    hd1 = CLASS_INFO.get(cls1, {}).get("hit_die", "d8") if cls1 else "d8"
+    hd2 = CLASS_INFO.get(cls2, {}).get("hit_die", "d8") if cls2 else None
+
+    total_lvl   = max(1, lvl1 + lvl2)
+    max_hit_die = total_lvl
+
+    # Hit dice available tracker (stored between rests)
+    # We use hp_vars as source of truth for current HP
+    try:
+        cur_hp  = int(hp_vars["cur"].get())
+        max_hp  = int(hp_vars["max"].get())
+    except:
+        cur_hp  = 0
+        max_hp  = 0
+
+    # -----------------------------------------------------------------------
+    # HIT DICE SECTION
+    # -----------------------------------------------------------------------
+    hd_frame = ttk.LabelFrame(win, text=" Hit Dice ")
+    hd_frame.pack(fill="x", padx=12, pady=8)
+
+    hd_info = f"{cls1}: {lvl1}{hd1}" if cls1 else ""
+    if cls2 and lvl2 > 0:
+        hd_info += f"  +  {cls2}: {lvl2}{hd2}"
+    tk.Label(hd_frame, text=hd_info, fg="gray",
+             font=("Arial", 9)).pack(pady=(4, 2))
+
+    tk.Label(hd_frame,
+             text="Click dice to spend on Short Rest:",
+             font=("Arial", 9)).pack(anchor="w", padx=8)
+
+    dice_frame  = tk.Frame(hd_frame)
+    dice_frame.pack(pady=4)
+
+    dice_vars   = []   # BooleanVar per die
+    dice_btns   = []   # Button per die
+
+    MAX_DISPLAY = min(total_lvl, 20)
+
+    for i in range(MAX_DISPLAY):
+        var = tk.BooleanVar(value=False)
+        dice_vars.append(var)
+
+        btn = tk.Checkbutton(
+            dice_frame,
+            variable=var,
+            text="⬡",
+            indicatoron=False,
+            selectcolor="#2980b9",
+            fg="white",
+            bg="#2c3e50",
+            activebackground="#2980b9",
+            font=("Arial", 11),
+            relief="flat",
+            width=2,
+            cursor="hand2"
+        )
+        btn.grid(row=i//10, column=i%10, padx=2, pady=2)
+        dice_btns.append(btn)
+
+    hp_preview = tk.Label(hd_frame, text=f"HP: {cur_hp} / {max_hp}",
+                          font=("Arial", 9, "bold"), fg="#27ae60")
+    hp_preview.pack(pady=(4, 6))
+
+    # SHORT REST
+    def short_rest():
+        spent = sum(1 for v in dice_vars if v.get())
+        if spent == 0:
+            messagebox.showinfo("Short Rest",
+                "Select at least one hit die to spend.")
+            return
+
+        import random
+        total_heal = 0
+        rolls      = []
+
+        try:
+            con_mod = mods_hive.get("CON", 0)
+        except:
+            con_mod = 0
+
+        # Roll each spent die — heroic minimum of 3
+        for i in range(spent):
+            # Determine which class die to use
+            if i < lvl1 and cls1:
+                die_size = int(hd1.replace("d","").replace("D",""))
+            elif cls2 and hd2:
+                die_size = int(hd2.replace("d","").replace("D",""))
+            else:
+                die_size = 8
+
+            roll  = max(3, random.randint(1, die_size))  # ← heroic minimum
+            heal  = roll + con_mod
+            total_heal += max(1, heal)
+            rolls.append(roll)
+
+        new_hp = min(max_hp, cur_hp + total_heal)
+        hp_vars["cur"].set(str(new_hp))
+        hp_preview.config(text=f"HP: {new_hp} / {max_hp}")
+
+        # Recover Warlock slots
+        ct1 = CLASS_INFO.get(cls1, {}).get("caster_type", "none")
+        ct2 = CLASS_INFO.get(cls2, {}).get("caster_type", "none")
+        if ct1 == "Warlock" or ct2 == "Warlock":
+            _reset_all_slots()
+
+        messagebox.showinfo("Short Rest",
+            f"🎲 Rolled: {rolls}\n"
+            f"CON mod: {'+' if con_mod>=0 else ''}{con_mod} per die\n"
+            f"Healed: +{total_heal} HP\n"
+            f"New HP: {new_hp}/{max_hp}")
+        win.destroy()
+    # LONG REST
+    def long_rest():
+        if not messagebox.askyesno("Long Rest",
+                "Take a Long Rest?\n\n"
+                "✅ Full HP restored\n"
+                "✅ All spell slots restored\n"
+                "✅ Hit dice refreshed (half total)\n\n"
+                "Continue?"):
+            return
+
+        # Full HP
+        hp_vars["cur"].set(hp_vars["max"].get())
+        hp_vars["tmp"].set("0")
+
+        # All spell slots
+        _reset_all_slots()
+
+        # Hit dice recover half (rounded up)
+        import math
+        recovered = math.ceil(total_lvl / 2)
+
+        messagebox.showinfo("Long Rest",
+            f"🌙 Long Rest complete!\n\n"
+            f"❤️  HP fully restored: {hp_vars['max'].get()}\n"
+            f"✨ All spell slots restored\n"
+            f"🎲 Hit dice recovered: {recovered}/{total_lvl}")
+        win.destroy()
+    # BUTTONS
+    btn_row = tk.Frame(win)
+    btn_row.pack(pady=10)
+
+    tk.Button(btn_row, text="💤 Short Rest",
+              command=short_rest,
+              bg="#2980b9", fg="white",
+              font=("Arial", 10, "bold"),
+              width=12).pack(side="left", padx=8)
+
+    tk.Button(btn_row, text="🌙 Long Rest",
+              command=long_rest,
+              bg="#8e44ad", fg="white",
+              font=("Arial", 10, "bold"),
+              width=12).pack(side="left", padx=8)
+
+    tk.Button(btn_row, text="Cancel",
+              command=win.destroy,
+              font=("Arial", 9),
+              width=8).pack(side="left", padx=4)
 def recalc_weapon_slot(slot):
     """Calculate to hit, damage and type for a weapon slot."""
     weapon_name = slot["weapon"].get()
@@ -776,12 +1113,10 @@ def is_proficient_with_weapon(weapon_name, properties):
 
     return False
 
-
 def recalc_all_weapon_slots():
     """Recalculate all weapon slots — called when stats or level change."""
     for slot in weapon_slot_vars:
         recalc_weapon_slot(slot)
-
 
 def refresh_weapon_dropdowns():
     """Update weapon dropdowns to show currently equipped weapons."""
@@ -916,6 +1251,7 @@ def get_character_data():
         "race": race_var.get(),
         "background": background_var.get(),
     }
+
 def save_character():
     data = get_character_data()
 
@@ -1023,7 +1359,7 @@ def load_character_data(data):
         refresh_feats()
         update_all_skills()
         refresh_spells()
-
+        refresh_spell_slots()
     except Exception as e:
 
         messagebox.showerror(
@@ -2117,12 +2453,18 @@ def open_character_wizard(parent, excel_path, class_info, subclass_map,
         win.destroy()
         on_complete(result)
  
-    # -----------------------------------------------------------------------
-    # START
-    # -----------------------------------------------------------------------
     show_page(0)
 
 # ---------------------------------------------------------------------------
+# JSON HELPERS
+
+def is_choice_feature(feature):
+
+    return (
+        feature.get("type")
+        == "choice"
+    )
+
 # BUILD0: Chracter Feats
 # ---------------------------------------------------------------------------
 def open_levelup_popup():
@@ -2275,7 +2617,10 @@ def build_feats_tab(parent):
               command=open_levelup_popup,
               bg="#27ae60", fg="white",
               font=("Arial", 9, "bold")).pack(side="left", padx=4)
-
+    tk.Button(action_bar, text="⛺ Rest",
+                command=open_rest_popup,
+                bg="#2c3e50", fg="white",
+                font=("Arial", 9, "bold")).pack(side="left", padx=4)
     # Left = feature list
     left = tk.Frame(main)
     left.pack(side="left", fill="y", padx=5, pady=5)
@@ -2296,6 +2641,7 @@ def build_feats_tab(parent):
 
     feats_listbox.bind("<<ListboxSelect>>", show_feat_description)
 def show_feat_description(event=None):
+    global JSON_FEATS_CACHE 
     sel = feats_listbox.curselection()
     if not sel:
         return
@@ -2382,6 +2728,27 @@ def show_feat_description(event=None):
         return
 
     all_feats = all_feats.sort_values(by="class_level")
+
+    if index < len(JSON_FEATS_CACHE):
+
+        feat = JSON_FEATS_CACHE[index]
+
+        feats_desc_text.delete("1.0", tk.END)
+
+        text = (
+            f"{feat['data']['name']}\n\n"
+            f"Class: {feat['class'].title()}\n"
+            f"Level: {feat['level']}\n"
+            f"Type: {feat['type']}\n\n"
+        )
+
+        if "text" in feat["data"]:
+            text += "\n".join(feat["data"]["text"])
+
+        feats_desc_text.insert("1.0", text)
+
+        return
+
     row = all_feats.iloc[index]
 
     feats_desc_text.delete("1.0", tk.END)
@@ -2395,12 +2762,14 @@ def show_feat_description(event=None):
 
     feats_desc_text.insert("1.0", text)
 def refresh_feats():
+    global JSON_FEATS_CACHE
     if feats_listbox is None:
         return
     feats_listbox.delete(0, tk.END)
 
     df = PROG_DF
     df["class_level"] = pd.to_numeric(df["class_level"], errors="coerce").fillna(0)
+    JSON_FEATS_CACHE = []
     all_feats = pd.DataFrame()
     if df.empty:
         return
@@ -2415,29 +2784,43 @@ def refresh_feats():
         lvl1 = int(class1_level_var.get())
     except:
         lvl1 = 0
-
+    print("=== DEBUG CLASS ===")
+    print("Class 1:", cls1)
+    print("Subclass 1:", sub1)
+    print("Level 1:", lvl1)
+    print("CLASS_JSON keys:", CLASS_JSON.keys())
     if cls1 and lvl1 > 0:
-
-        class_feats_1 = df[
-            (df["class_id"] == cls1) &
-            (df["subclass_id"].isna()) &
-            (df["class_level"] <= lvl1)
-        ]
-
-        if sub1:
-            sub_feats_1 = df[
+        if cls1.lower() in CLASS_JSON:
+            print("JSON CLASS FOUND!")
+            JSON_FEATS_CACHE.extend(
+                get_features_for_character(
+                    cls1,
+                    sub1,
+                    lvl1
+                )
+            )
+            print("JSON FEATS FOUND:", len(JSON_FEATS_CACHE))
+        else:
+            class_feats_1 = df[
                 (df["class_id"] == cls1) &
-                (df["subclass_id"] == sub1) &
+                (df["subclass_id"].isna()) &
                 (df["class_level"] <= lvl1)
             ]
-        else:
-            sub_feats_1 = pd.DataFrame()
 
-        all_feats = pd.concat([
-            all_feats,
-            class_feats_1,
-            sub_feats_1
-        ])
+            if sub1:
+                sub_feats_1 = df[
+                    (df["class_id"] == cls1) &
+                    (df["subclass_id"] == sub1) &
+                    (df["class_level"] <= lvl1)
+                ]
+            else:
+                sub_feats_1 = pd.DataFrame()
+
+            all_feats = pd.concat([
+                all_feats,
+                class_feats_1,
+                sub_feats_1
+            ])
 
     # =========================
     # CLASS 2
@@ -2452,48 +2835,83 @@ def refresh_feats():
         lvl2 = 0
 
     if cls2 and lvl2 > 0:
+        if cls2.lower() in CLASS_JSON:
 
-        class_feats_2 = df[
-            (df["class_id"] == cls2) &
-            (df["subclass_id"].isna()) &
-            (df["class_level"] <= lvl2)
-        ]
+            JSON_FEATS_CACHE.extend(
+                get_features_for_character(
+                    cls2,
+                    sub2,
+                    lvl2
+                )
+            )
 
-        if sub2:
-            sub_feats_2 = df[
+        else:
+            class_feats_2 = df[
                 (df["class_id"] == cls2) &
-                (df["subclass_id"] == sub2) &
+                (df["subclass_id"].isna()) &
                 (df["class_level"] <= lvl2)
             ]
-        else:
-            sub_feats_2 = pd.DataFrame()
 
-        all_feats = pd.concat([
-            all_feats,
-            class_feats_2,
-            sub_feats_2
-        ])
+            if sub2:
+                sub_feats_2 = df[
+                    (df["class_id"] == cls2) &
+                    (df["subclass_id"] == sub2) &
+                    (df["class_level"] <= lvl2)
+                ]
+            else:
+                sub_feats_2 = pd.DataFrame()
+
+            all_feats = pd.concat([
+                all_feats,
+                class_feats_2,
+                sub_feats_2
+            ])
 
     # =========================
     # SORT + DISPLAY
     # =========================
-
-    if all_feats.empty:
+    if all_feats.empty and not JSON_FEATS_CACHE:
         return
 
-    all_feats = all_feats.sort_values(by="class_level")
+    if not all_feats.empty:
+        all_feats = all_feats.sort_values(by="class_level")
 
-    for _, row in all_feats.iterrows():
+    # JSON features first
+    for feat in JSON_FEATS_CACHE:
+        print(feat["type"], feat["data"]["name"])
+        feat_type = feat.get("type", "feature")
 
-        cls_name = row["class_id"]
+        prefix = ""
+
+        if feat_type == "choice":
+            prefix = "[CHOICE] "
+
+        elif feat_type == "table":
+            prefix = "[TABLE] "
+
+        elif feat_type == "resource":
+            prefix = "[RESOURCE] "
 
         name = (
-            f"{cls_name} "
-            f"Lv {int(row['class_level'])} "
-            f"- {row['name']}"
+            f"{feat['class'].title()} "
+            f"Lv {feat['level']} "
+            f"- {prefix}{feat['data']['name']}"
         )
 
         feats_listbox.insert(tk.END, name)
+
+    # Excel features second
+    if not all_feats.empty:
+
+        for _, row in all_feats.iterrows():
+
+            name = (
+                f"{row['class_id']} "
+                f"Lv {int(row['class_level'])} "
+                f"- {row['name']}"
+            )
+
+            feats_listbox.insert(tk.END, name)
 # ---------------------------------------------------------------------------
 # BUILD000: CHARACTER IDENTITY
 # ---------------------------------------------------------------------------
@@ -2566,7 +2984,7 @@ def build_identity(parent):
     global race_var, background_var
     global name_entry, sex_entry
     global skills_lbl, languages_lbl, equipment_lbl
-
+    global cantrip_label, spells_known_label
     global class1_var, subclass1_var
     global class2_var, subclass2_var
 
@@ -2574,7 +2992,7 @@ def build_identity(parent):
     global player_level_var
     global subclass1_box
     global subclass2_box
-    
+
     # Row 0: Name / Level
     name_entry = tk.Entry(frame, width=18)
     name_entry.grid(row=0, column=0, padx=8, pady=4)
@@ -2686,41 +3104,30 @@ def build_identity(parent):
     
     def on_class1_selected(event=None):
         cls = class1_var.get()
-
         info = CLASS_INFO.get(cls, {})
-
         spell_ability_lbl.config(text=info.get("spell_ability", "—"))
-
         subs = SUBCLASS_MAP.get(cls, [])
         subclass1_box.config(values=subs)
-
         subclass1_var.set("")
-
         refresh_feats()
+        refresh_spell_slots()   # ← add this
+
     def on_class2_selected(event=None):
         cls = class2_var.get()
-
         subs = SUBCLASS_MAP.get(cls, [])
         subclass2_box.config(values=subs)
-
         subclass2_var.set("")
-
         refresh_feats()
+        refresh_spell_slots()   # ← add this
 
     def update_player_level(*args):
-        try:
-            lv1 = int(class1_level_var.get())
-        except:
-            lv1 = 0
+        try: lv1 = int(class1_level_var.get())
+        except: lv1 = 0
+        try: lv2 = int(class2_level_var.get())
+        except: lv2 = 0
+        player_level_var.set(str(lv1 + lv2))
+        refresh_spell_slots()   # ← add this
 
-        try:
-            lv2 = int(class2_level_var.get())
-        except:
-            lv2 = 0
-
-        total = lv1 + lv2
-
-        player_level_var.set(str(total))
 
     class1_level_var.trace_add("write", update_player_level)
     class2_level_var.trace_add("write", update_player_level)
@@ -2736,22 +3143,11 @@ def build_identity(parent):
     class2_var.trace_add("write", update_hit_dice)
     class1_level_var.trace_add("write", update_hit_dice)
     class2_level_var.trace_add("write", update_hit_dice)
-    class1_var.trace_add(
-        "write",
-        lambda *_: update_spell_slots()
-    )
-    class2_var.trace_add(
-        "write",
-        lambda *_: update_spell_slots()
-    )
-    class1_level_var.trace_add(
-        "write",
-        lambda *_: update_spell_slots()
-    )
-    class2_level_var.trace_add(
-        "write",
-        lambda *_: update_spell_slots()
-    )
+
+    class1_var.trace_add("write",       lambda *_: refresh_spell_slots())
+    class2_var.trace_add("write",       lambda *_: refresh_spell_slots())
+    class1_level_var.trace_add("write", lambda *_: refresh_spell_slots())
+    class2_level_var.trace_add("write", lambda *_: refresh_spell_slots())
 
 def build_save_load(parent):
     global prof_text   
@@ -2793,6 +3189,7 @@ def build_save_load(parent):
 
 def build_combat_hud(parent):
     global ac_var, speed_var, passive_var, initiative_label
+    global cantrip_label, spells_known_label
     frame = ttk.LabelFrame(parent, text=" Combat & Actions ")
     frame.pack(side="left", fill="both", expand=False, padx=5)
 
@@ -2809,8 +3206,6 @@ def build_combat_hud(parent):
                  font=("Arial",13,"bold"), justify="center").pack(padx=4, pady=2)
         return var
 
-
-
     init_b = tk.Frame(top, relief="groove", bd=1)
     init_b.pack(side="left", padx=8)
     tk.Label(init_b, text="Initiative", font=("Arial",8)).pack()
@@ -2821,6 +3216,58 @@ def build_combat_hud(parent):
     ac_var      = editable_bubble(top, "AC", "10")
     speed_var   = editable_bubble(top, "Speed (ft)", "30")
     passive_var = editable_bubble(top, "Passive Perc.", "10")
+
+    # Condition
+    cond_b = tk.Frame(top, relief="groove", bd=1)
+    cond_b.pack(side="left", padx=4)
+    tk.Label(cond_b, text="Condition", font=("Arial",8)).pack()
+
+    CONDITIONS = [
+        "—",
+        "Blinded", "Charmed", "Deafened",
+        "Exhaustion 1", "Exhaustion 2", "Exhaustion 3",
+        "Exhaustion 4", "Exhaustion 5",
+        "Frightened", "Grappled", "Incapacitated",
+        "Invisible", "Paralyzed", "Petrified",
+        "Poisoned", "Prone", "Restrained",
+        "Stunned", "Unconscious",
+    ]
+
+    condition_var = tk.StringVar(value="—")
+    condition_box = ttk.Combobox(
+        cond_b,
+        textvariable=condition_var,
+        values=CONDITIONS,
+        state="readonly",
+        width=10,
+        font=("Arial",9)
+    )
+    condition_box.pack(padx=4, pady=2)
+
+    def on_condition_change(event=None):
+        cond = condition_var.get()
+        if cond == "—":
+            condition_box.config(foreground="black")
+            return
+        # Color code by severity
+        danger = {"Paralyzed","Petrified","Stunned","Unconscious","Incapacitated"}
+        caution = {"Blinded","Charmed","Deafened","Frightened",
+                   "Grappled","Poisoned","Prone","Restrained","Invisible"}
+        exhaust = {f"Exhaustion {i}" for i in range(1,6)}
+
+        if cond in danger:
+            condition_box.config(foreground="#c0392b")   # red
+        elif cond in caution:
+            condition_box.config(foreground="#e67e22")   # orange
+        elif cond in exhaust:
+            level = int(cond[-1])
+            colors = ["#f1c40f","#e67e22","#e74c3c",
+                      "#c0392b","#8e44ad"]
+            condition_box.config(foreground=colors[level-1])
+        else:
+            condition_box.config(foreground="black")
+
+    condition_box.bind("<<ComboboxSelected>>", on_condition_change)
 
     # HP Tracker
     hp_frame = ttk.LabelFrame(frame, text=" Hit Points ")
@@ -2871,6 +3318,23 @@ def build_combat_hud(parent):
         justify="center",
         font=("Arial",11,"bold")
     ).pack(pady=1)
+    # Death Saves — sits right next to Hit Dice
+    death_cell = tk.Frame(hp_frame)
+    death_cell.grid(row=0, column=5)
+
+    tk.Label(death_cell, text="Death Sav",
+             font=("Arial",8,"bold")).pack()
+
+    death_save_var = tk.StringVar(value="")
+    tk.Entry(death_cell, textvariable=death_save_var,
+             width=6, justify="center",
+             font=("Arial",10,"bold"),
+             fg="darkred").pack(pady=2)
+
+    tk.Label(death_cell, text="✓/✗",
+             fg="gray", font=("Arial",8)).pack()
+
+
     def adjust_hp(delta):
         try:
             hp_vars["cur"].set(str(max(0, min(int(hp_vars["max"].get()),
@@ -2887,13 +3351,12 @@ def build_combat_hud(parent):
             adjust_hp(sign * int(amt_var.get())); amt_var.set("")
         except ValueError:
             pass
-
+    tk.Label(btn_row, text="amt", justify="left").pack(side="bottom")
     tk.Button(btn_row, text="– Damage", bg="#c0392b", fg="white",
               command=lambda: adjust_hp(-1)).pack(side="left", padx=3)
     tk.Button(btn_row, text="+ Heal", bg="#27ae60", fg="white",
               command=lambda: adjust_hp(1)).pack(side="left", padx=3)
     tk.Entry(btn_row, textvariable=amt_var, width=5, justify="center").pack(side="left", padx=3)
-    tk.Label(btn_row, text="amt").pack(side="left")
     tk.Button(btn_row, text="Apply–", bg="#c0392b", fg="white",
               command=lambda: apply_amt(-1)).pack(side="left", padx=2)
     tk.Button(btn_row, text="Apply+", bg="#27ae60", fg="white",
@@ -2957,6 +3420,18 @@ def build_combat_hud(parent):
 
     spell_frame = ttk.LabelFrame(frame, text=" Spellcasting ")
     spell_frame.pack(fill="x", padx=6, pady=6)
+    global cantrip_label, spells_known_label
+    # Static info row
+    info_row = tk.Frame(spell_frame)
+    info_row.pack(fill="x", padx=8, pady=(4, 2))
+
+    cantrip_label = tk.Label(info_row, text="Cantrips: —",
+                             font=("Arial", 9), fg="cyan", anchor="w")
+    cantrip_label.pack(side="left", padx=(0, 16))
+
+    spells_known_label = tk.Label(info_row, text="Spells Known: —",
+                                  font=("Arial", 9), fg="cyan", anchor="w")
+    spells_known_label.pack(side="left")
 
     slots_container = tk.Frame(spell_frame)
     slots_container.pack()
@@ -3123,7 +3598,7 @@ def build_skills(parent):
 
         save_cb.pack(side="left", padx=2)
         save_lbl = tk.Label(save_frame, text="Save +0",
-                             fg="darkred", font=("Arial", 10, "bold"))
+                             fg="darkred", font=("Arial", 8, "bold"))
         save_lbl.pack(side="left")
         save_labels[stat] = save_lbl
 
@@ -3210,28 +3685,383 @@ def roll_skill(stat, prof_var, mode):
     else: tray_label.config(fg="#2c3e50")
 
 
-def toggle_spell_slot(level, index):
+def toggle_spell_slot(level, idx):
+    """Toggle a spell slot used/available — only if slot exists."""
+    cls1 = class1_var.get()
+    cls2 = class2_var.get()
+    try: lvl1 = int(class1_level_var.get() or 0)
+    except: lvl1 = 0
+    try: lvl2 = int(class2_level_var.get() or 0)
+    except: lvl2 = 0
 
-    slots = spell_slot_vars[level]
+    # Check slot actually exists before toggling
+    if level not in spell_slot_vars:
+        return
+    if idx >= len(spell_slot_vars[level]):
+        return
+    # Don't toggle invisible slots
+    lbl = spell_slot_labels[level][idx]
+    if lbl.cget("fg") == "#1e1e2e":
+        return
 
-    slots[index] = not slots[index]
-
-    refresh_spell_slots()
+    # Toggle
+    spell_slot_vars[level][idx] = not spell_slot_vars[level][idx]
+    active = spell_slot_vars[level][idx]
+    lbl.config(
+        fg="cyan" if active else "gray",
+        text="★"  if active else "☆"
+    )
 def refresh_spell_slots():
+    if SLOTS_DF is None or SLOTS_DF.empty:
+        return
+    if not spell_slot_labels:
+        return
 
-    for level, labels in spell_slot_labels.items():
+    # --- Determine effective caster levels ---
+    cls1 = class1_var.get()
+    cls2 = class2_var.get()
+    try: lvl1 = int(class1_level_var.get() or 0)
+    except: lvl1 = 0
+    try: lvl2 = int(class2_level_var.get() or 0)
+    except: lvl2 = 0
 
-        slots = spell_slot_vars[level]
+    def get_caster_type(cls):
+        return CLASS_INFO.get(cls, {}).get("caster_type", "none").strip()
 
-        for i, lbl in enumerate(labels):
+    def effective_caster_level(cls, lvl):
+        ct = get_caster_type(cls)
+        if ct in ("Full",):          return lvl
+        if ct in ("Half",):          return lvl // 2
+        if ct in ("Quarter",):       return lvl // 4
+        if ct == "Artificer":        return -lvl   # handled separately
+        if ct == "Warlock":          return 0      # handled separately
+        return 0
 
-            if slots[i]:
-                lbl.config(text="★", fg="cyan")
+    ct1 = get_caster_type(cls1)
+    ct2 = get_caster_type(cls2)
+
+    # --- Warlock slots (always separate) ---
+    warlock_key = None
+    if ct1 == "Warlock" and lvl1 > 0:
+        warlock_key = f"L{lvl1}_Warlock"
+    elif ct2 == "Warlock" and lvl2 > 0:
+        warlock_key = f"L{lvl2}_Warlock"
+
+    # --- Artificer slots ---
+    artificer_key = None
+    if ct1 == "Artificer" and lvl1 > 0:
+        artificer_key = f"L{lvl1}_Artificer"
+    elif ct2 == "Artificer" and lvl2 > 0:
+        artificer_key = f"L{lvl2}_Artificer"
+
+    # --- Combined multiclass caster level ---
+    ecl = 0
+    for cls, lvl in [(cls1, lvl1), (cls2, lvl2)]:
+        ct = get_caster_type(cls)
+        if ct == "Full":     ecl += lvl
+        elif ct == "Half":   ecl += lvl // 2
+        elif ct == "Quarter": ecl += lvl // 4
+        # Warlock and Artificer handled separately
+
+# --- Determine which key to look up ---
+    if warlock_key and ecl == 0:
+        lookup_key = warlock_key
+    elif artificer_key and ecl == 0:
+        lookup_key = artificer_key
+    elif ecl > 0:
+        lookup_key = f"L{ecl}_FullCaster"
+    # --- Monk ---
+    elif ct1 == "Monk" and lvl1 > 0:
+        lookup_key = f"L{lvl1}_Monk"
+    elif ct2 == "Monk" and lvl2 > 0:
+        lookup_key = f"L{lvl2}_Monk"
+    # --- Barbarian ---
+    elif ct1 == "Barbarian" and lvl1 > 0:
+        lookup_key = f"L{lvl1}_Barbarian"
+    elif ct2 == "Barbarian" and lvl2 > 0:
+        lookup_key = f"L{lvl2}_Barbarian"
+    else:
+        for level in range(1, 10):
+            if level in spell_slot_labels:
+                for lbl in spell_slot_labels[level]:
+                    lbl.config(fg="#1e1e2e", text="★")
+        return
+    # --- Look up slot row ---
+    df  = SLOTS_DF
+    col = "Caster_Level" if "Caster_Level" in df.columns else df.columns[0]
+    row_match = df[df[col].astype(str).str.strip() == lookup_key]
+
+    # Also check warlock separately if multiclassing
+    warlock_row = None
+    if warlock_key and ecl > 0:
+        wm = df[df[col].astype(str).str.strip() == warlock_key]
+        if not wm.empty:
+            warlock_row = wm.iloc[0]
+
+    if row_match.empty:
+        return
+
+    slot_row = row_match.iloc[0]
+
+# --- Monk: show Ki Points, hide slots ---
+    if lookup_key and "Monk" in lookup_key:
+        for level in range(1, 10):
+            if level in spell_slot_labels:
+                for lbl in spell_slot_labels[level]:
+                    lbl.config(fg="#1e1e2e", text="★")
+        try:
+            ki = slot_row.get("Ki_Points", 0)
+            ki_count = int(ki) if pd.notna(ki) else 0
+            if spells_known_label is not None:
+                spells_known_label.config(text=f"Ki Points: {ki_count}")
+            if cantrip_label is not None:
+                cantrip_label.config(text="Cantrips: —")
+        except:
+            pass
+        return
+
+    # --- Barbarian: show Rage count + damage bonus, hide slots ---
+    if lookup_key and "Barbarian" in lookup_key:
+        for level in range(1, 10):
+            if level in spell_slot_labels:
+                for lbl in spell_slot_labels[level]:
+                    lbl.config(fg="#1e1e2e", text="★")
+        try:
+            rage_count  = slot_row.get("Rage_Count", 0)
+            rage_damage = slot_row.get("Rage_Damage", "+2")
+            rc = int(rage_count) if pd.notna(rage_count) else 0
+            rd = str(rage_damage).strip() if pd.notna(rage_damage) else "+2"
+            if rc == 36:
+                rc_display = "∞"
             else:
-                lbl.config(text="☆", fg="red")
+                rc_display = str(rc)
+            if spells_known_label is not None:
+                spells_known_label.config(
+                    text=f"Rages: {rc_display} | Bonus: {rd}")
+            if cantrip_label is not None:
+                cantrip_label.config(text="Cantrips: —")
+        except:
+            pass
+        return
 
 
+    # --- Update star displays ---
+    slot_col_map = {
+        1: "Slot_Level_1", 2: "Slot_Level_2", 3: "Slot_Level_3",
+        4: "Slot_Level_4", 5: "Slot_Level_5", 6: "Slot_Level_6",
+        7: "Slot_Level_7", 8: "Slot_Level_8", 9: "Slot_Level_9",
+    }
 
+    for level in range(1, 10):
+        if level not in spell_slot_labels:
+            continue
+
+        col_name = slot_col_map.get(level)
+        count = 0
+
+        try:
+            val = slot_row.get(col_name, 0)
+            count = int(val) if pd.notna(val) else 0
+        except:
+            count = 0
+
+        # Warlock pact slots override levels 1-5 if multiclassing
+        if warlock_row is not None and level <= 5:
+            try:
+                wval = warlock_row.get(col_name, 0)
+                wcount = int(wval) if pd.notna(wval) else 0
+                # Warlock slots are separate — add them
+                count += wcount
+            except:
+                pass
+
+        labels = spell_slot_labels[level]
+        for i, lbl in enumerate(labels):
+            if i < count:
+                # Slot exists — show active or used based on current state
+                if spell_slot_vars.get(level) and i < len(spell_slot_vars[level]):
+                    active = spell_slot_vars[level][i]
+                else:
+                    active = True
+                lbl.config(
+                    fg="cyan"  if active else "gray",
+                    text="★"   if active else "☆"
+                )
+            else:
+                # Slot doesn't exist at this level — hide it
+                lbl.config(fg="#1e1e2e", text="★")  # invisible
+
+# --- Cantrips Known ---
+    cantrip_count = 0
+    df_stripped = SLOTS_DF.copy()
+    df_stripped.columns = [c.strip() for c in df_stripped.columns]
+
+    for cls, lvl in [(cls1, lvl1), (cls2, lvl2)]:
+        if not cls or cls in ("Class", "") or lvl <= 0:
+            continue
+
+        # Step 1: Class → Caster_Type
+        ct = CLASS_INFO.get(cls, {}).get("caster_type", "none")
+        if ct == "none":
+            continue
+
+        # Step 2: Class → ClassName_Cantrips column
+        col_name = CANTRIP_COL.get(cls, "").strip()
+        if not col_name:
+            continue
+        if col_name not in df_stripped.columns:
+            print(f"Column not found: {col_name}")
+            continue
+
+        # Step 3: Find row where Caster_Type AND class_lv both match
+        try:
+            cant_rows = df_stripped[
+                (df_stripped["Caster_Type"].astype(str).str.strip() == ct) &
+                (df_stripped["class_lv"].apply(
+                    lambda x: int(float(x)) if pd.notna(x) else -1
+                ) == lvl)
+            ]
+            if not cant_rows.empty:
+                val = cant_rows.iloc[0][col_name]
+                cantrip_count += int(val) if pd.notna(val) and str(val) != "" else 0
+        except Exception as e:
+            print(f"Cantrip lookup error: {type(e).__name__}: {e}")
+    if cantrip_label is not None:
+        cantrip_label.config(
+            text=f"Cantrips: {cantrip_count if cantrip_count > 0 else '—'}"
+        )
+# --- Spells Known / Prepared ---
+    spells_known_count = 0
+    spells_known_label_text = "Known"
+    artificer_infusions = 0
+    artificer_infused   = 0
+    show_artificer      = False
+
+    sp_df = SLOTS_DF.copy()
+    sp_df.columns = [c.strip() for c in sp_df.columns]
+
+    # Stat mod helpers
+    def get_mod(stat):
+        try:
+            score = int(sb_vars[stat].get())
+            return (score - 10) // 2
+        except:
+            return 0
+
+    PREPARED_CLASSES = {"Cleric", "Druid", "Wizard", "Paladin", "Artificer"}
+
+    STATIC_SPELLS_COL = {
+        "Bard":     "Bard_Spells",
+        "Sorcerer": "Sorcerer_Spells",
+        "Ranger":   "Ranger_Spells",
+        "Fighter":  "Fighter_Spells",
+        "Rogue":    "Rogue_Spells",
+        "Warlock":  "Warlock_Spells",
+    }
+
+    for cls, lvl in [(cls1, lvl1), (cls2, lvl2)]:
+        if not cls or cls in ("Class", "") or lvl <= 0:
+            continue
+
+        ct = CLASS_INFO.get(cls, {}).get("caster_type", "none")
+
+        # --- Artificer infusions (separate display) ---
+        if cls == "Artificer":
+            show_artificer = True
+            try:
+                art_rows = sp_df[
+                    (sp_df["Caster_Type"].astype(str).str.strip() == "Artificer") &
+                    (sp_df["class_lv"].apply(
+                        lambda x: int(float(x)) if pd.notna(x) else -1
+                    ) == lvl)
+                ]
+                if not art_rows.empty:
+                    inf_val = art_rows.iloc[0].get("Artificer_Infusions", 0)
+                    ied_val = art_rows.iloc[0].get("Artificer_Infused", 0)
+                    artificer_infusions = int(inf_val) if pd.notna(inf_val) else 0
+                    artificer_infused   = int(ied_val) if pd.notna(ied_val) else 0
+            except Exception as e:
+                print(f"Artificer infusion error: {e}")
+
+            # Artificer prepared spells = INT mod + half level rounded down
+            prep = get_mod("INT") + (lvl // 2)
+            spells_known_count += max(0, prep)
+            spells_known_label_text = "Prepared"
+            continue
+
+        # --- Formula classes ---
+        if cls == "Cleric":
+            spells_known_count += max(0, get_mod("WIS") + lvl)
+            spells_known_label_text = "Prepared"
+            continue
+
+        if cls == "Druid":
+            spells_known_count += max(0, get_mod("WIS") + lvl)
+            spells_known_label_text = "Prepared"
+            continue
+
+        if cls == "Wizard":
+            spells_known_count += max(0, get_mod("INT") + lvl)
+            spells_known_label_text = "Prepared"
+            continue
+
+        if cls == "Paladin":
+            spells_known_count += max(0, get_mod("CHA") + (lvl // 2))
+            spells_known_label_text = "Prepared"
+            continue
+
+        # --- Ki Points (Monk — in Full chart) ---
+        if cls == "Monk":
+            try:
+                monk_rows = sp_df[
+                    (sp_df["Caster_Type"].astype(str).str.strip() == "Full") &
+                    (sp_df["class_lv"].apply(
+                        lambda x: int(float(x)) if pd.notna(x) else -1
+                    ) == lvl)
+                ]
+                if not monk_rows.empty:
+                    ki_val = monk_rows.iloc[0].get("Ki_Points", 0)
+                    spells_known_count += int(ki_val) if pd.notna(ki_val) else 0
+                    spells_known_label_text = "Ki Points"
+            except Exception as e:
+                print(f"Ki points error: {e}")
+            continue
+
+        # --- Static lookup classes ---
+        col_name = STATIC_SPELLS_COL.get(cls, "").strip()
+        if not col_name:
+            continue
+        if col_name not in sp_df.columns:
+            print(f"Spells col not found: {col_name}")
+            continue
+
+        try:
+            sp_rows = sp_df[
+                (sp_df["Caster_Type"].astype(str).str.strip() == ct) &
+                (sp_df["class_lv"].apply(
+                    lambda x: int(float(x)) if pd.notna(x) else -1
+                ) == lvl)
+            ]
+            if not sp_rows.empty:
+                val = sp_rows.iloc[0][col_name]
+                spells_known_count += int(val) if pd.notna(val) else 0
+                spells_known_label_text = "Known"
+        except Exception as e:
+            print(f"Spells known error: {e}")
+
+    # --- Update labels ---
+    if spells_known_label is not None:
+        if show_artificer:
+            spells_known_label.config(
+                text=f"Prepared: {spells_known_count} | "
+                     f"Infusions: {artificer_infusions} | "
+                     f"Infused: {artificer_infused}"
+            )
+        else:
+            spells_known_label.config(
+                text=f"{spells_known_label_text}: "
+                     f"{spells_known_count if spells_known_count > 0 else '—'}"
+            )
 # ---------------------------------------------------------------------------
 # BUILD001: SPELL LOOKUP PANEL
 # ---------------------------------------------------------------------------
@@ -3360,7 +4190,7 @@ def build_spell_panel(parent):
     
     tk.Label(equip_col, text="Equipped", font=("Arial", 10, "bold")).pack()
 
-    equip_listbox = tk.Listbox(equip_col, width=18, height=10, selectmode="single")
+    equip_listbox = tk.Listbox(equip_col, width=18, height=15, selectmode="single")
     equip_listbox.pack(fill="y")
     
     tk.Label(diagram_col, text="Spell Visual", font=("Arial", 10, "bold")).pack()
@@ -3372,7 +4202,7 @@ def build_spell_panel(parent):
     bar = tk.Frame(main_row)
     bar.pack(fill="x", padx=6, pady=4)
 
-    tk.Label(bar, text="Class:").pack(side="left")
+    tk.Label(bar, text="").pack(side="left")
     spell_class_var = tk.StringVar(value="All")
     cb = ttk.Combobox(bar, textvariable=spell_class_var,
                       values=["All"] + sorted(CLASS_INFO.keys()),
@@ -3618,9 +4448,20 @@ def build_item_browser(parent, on_add_callback):
                 name = str(row[name_col])
 
 def build_inventory_tab(parent):
-    global backpack_listbox, equipped_listbox, item_listbox, item_type_var, item_desc_text
+    global backpack_listbox, equipped_listbox, item_listbox, item_type_var, item_desc_text, equipment_backpack_listbox, global_refs, backpack_items, refresh_backpack_func
     backpack_items = []
+    global backpack_items_global
     equipped_items = []
+    backpack_items_global = backpack_items
+    # Store the refresh function globally
+    def refresh_backpack():
+        backpack_listbox.delete(0, tk.END)
+        for item in backpack_items:
+            backpack_listbox.insert(tk.END, item)
+    
+    # Make refresh_backpack available globally
+    refresh_backpack_func = refresh_backpack
+
     # ---------------------------
     # MAIN LAYOUT (like spells)
     # ---------------------------
@@ -3642,9 +4483,9 @@ def build_inventory_tab(parent):
 
     backpack_listbox = tk.Listbox(left_col, width=30, height=13, selectmode="single")
     backpack_listbox.pack(fill="y", expand=True)
-
+    global_refs["backpack_listbox"] = backpack_listbox  # ← ADD THIS
+    
     tk.Label(left_col, text="Equipped", font=("Arial",10,"bold")).pack(pady=(10,0))
-
     equipped_listbox = tk.Listbox(left_col, width=30, height=18, selectmode="single")
     equipped_listbox.pack(fill="y")
 
@@ -3887,6 +4728,9 @@ def build_inventory_tab(parent):
     backpack_listbox.bind("<<ListboxSelect>>", show_item_details)
     equipped_listbox.bind("<<ListboxSelect>>", show_item_details)
 
+
+
+
     # ---------------------------
     # INITIAL LOAD
     # ---------------------------
@@ -3894,6 +4738,16 @@ def build_inventory_tab(parent):
     refresh_backpack()
     refresh_equipped()
     build_wallet(right_col)
+    def add_to_backpack_from_anywhere(item_name):
+        """Callback function for adding items from NPC shops."""
+        backpack_items.append(item_name)
+        refresh_backpack()
+        print(f"🎒 Added '{item_name}' to backpack via callback")
+
+    # Store this callback somewhere accessible
+    global add_to_backpack_callback
+    add_to_backpack_callback = add_to_backpack_from_anywhere
+
 def build_wallet(parent):
 
     wallet_frame = ttk.LabelFrame(parent, text=" Wallet ")
@@ -4146,6 +5000,38 @@ def build_background_tab(parent):
 # MAIN WINDOW
 # ---------------------------------------------------------------------------
 
+def build_ui():
+    global sheet_tab, spells_tab, vtt_tab, npc_tab, vtt_instance, player_vtt_built
+    
+    # Create notebook
+    notebook = ttk.Notebook(root)
+    notebook.pack(fill="both", expand=True)
+    
+    # Build character tab
+    sheet_tab = tk.Frame(notebook)
+    notebook.add(sheet_tab, text="Character")
+    build_identity(sheet_tab)
+    
+    # Build spells tab
+    spells_tab = tk.Frame(notebook)
+    notebook.add(spells_tab, text="Spells")
+    build_spell_panel(spells_tab)
+    
+    # Build VTT tab (once)
+    vtt_tab = tk.Frame(notebook)
+    notebook.add(vtt_tab, text="VTT")
+    vtt_instance, vtt_canvas = build_vtt_tab(vtt_tab, npc_mode)  # Pass npc_mode if needed
+    player_vtt_built = True
+    
+    # Build NPC tab
+    npc_tab = tk.Frame(notebook)
+    notebook.add(npc_tab, text="NPC Mode")
+    npc_mode = NPCMode(npc_tab, lambda data: vtt_instance.create_token_from_npc(data) if vtt_instance else None)
+    
+    # Store notebook reference
+    root.notebook = notebook
+
+
 root = tk.Tk()
 global advantage_var
 advantage_var = tk.IntVar(value=0)
@@ -4173,13 +5059,6 @@ ttk.Separator(root, orient="horizontal").pack(fill="x")
 
 notebook = ttk.Notebook(root)
 notebook.pack(fill="both", expand=True)
-
-
-tk.Label(top_bar, text="Mode:").pack(side="left", padx=5)
-
-ttk.Combobox(top_bar, textvariable=mode_var,
-             values=["PLAYER", "DM", "NPC"],
-             state="readonly", width=10).pack(side="left")
 
 tk.Button(top_bar, text="💾 Save",
           command=save_character).pack(side="right", padx=5)
@@ -4290,7 +5169,7 @@ def on_wizard_complete(result):
     update_all_skills()
     refresh_spells()
     update_hit_dice()
-
+    refresh_spell_slots()
     messagebox.showinfo("Character Created",
         f"✨ {result['name']} is ready for adventure!")
 def launch_wizard():
@@ -4329,10 +5208,10 @@ feats_tab = tk.Frame(notebook)
 background_tab = tk.Frame(notebook)
 notes_tab = tk.Frame(notebook)
 pets_tab = tk.Frame(notebook)
-npc_tab = tk.Frame(notebook)
+npc_tab = ttk.Frame(notebook)
 hb_tab = tk.Frame(notebook)
-vtt_tab = tk.Frame(notebook)
-player_vtt_tab = tk.Frame(notebook)
+vtt_tab = ttk.Frame(notebook)
+player_vtt_tab = ttk.Frame(notebook)
 
 notebook.add(sheet_outer, text="Character")
 # Canvas + Scrollbar
@@ -4374,6 +5253,13 @@ def _on_mousewheel(event):
 
 sheet_canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
+def on_spawn_npc(npc_data):
+    """Receive NPC data from NPC mode and create VTT token."""
+    if vtt_instance and hasattr(vtt_instance, 'create_token_from_npc'):
+        vtt_instance.create_token_from_npc(npc_data)
+    else:
+        print(f"VTT token creation not implemented yet. NPC data: {npc_data}")
+
 notebook.add(spells_tab, text="Spells")
 notebook.add(inventory_tab,  text="Equipment")
 notebook.add(feats_tab,  text="Class Feats")
@@ -4381,32 +5267,61 @@ notebook.add(background_tab,  text="Background")
 #notebook.add(items_tab,  text="Items")
 notebook.add(notes_tab, text="Notes")
 notebook.add(pets_tab, text="Companions")
-notebook.add(npc_tab, text="NPC Mode")
 notebook.add(hb_tab, text="Homebrew")
+notebook.add(player_vtt_tab, text="Battle Map")
+notebook.add(npc_tab, text="NPC Mode")
+notebook.add(vtt_tab, text="DMT")
+
 
 
 simtower = SimTowerApp(hb_tab)
 
-
 def build_spell_slot_panel(parent):
 
     global spell_slot_vars
-
 build_spell_panel(spells_tab)
-
-NPCMode(npc_tab)
-
-npc_mode_instance = NPCMode(npc_tab)
-vtt = VTT(root, npc_mode_instance)
-vtt.npc_ai_tick()
+def get_player_gold_cp():
+    """Return player's total gold in copper pieces."""
+    return wallet_to_cp()
+def deduct_player_gold_cp(amount_cp):
+    """Deduct amount in copper pieces from wallet."""
+    current_cp = wallet_to_cp()
+    new_cp = max(0, current_cp - amount_cp)
+    set_wallet_from_cp(new_cp)
+    return new_cp
+def add_player_gold_cp(amount_cp):
+    """Add amount in copper pieces to wallet."""
+    current_cp = wallet_to_cp()
+    new_cp = current_cp + amount_cp
+    set_wallet_from_cp(new_cp)
+    return new_cp
 
 build_inventory_tab(inventory_tab)
+
+def temp_callback(data):
+    print("VTT not ready yet, NPC data:", data)
+
+vtt_instance, vtt_canvas = build_vtt_tab(vtt_tab, None)
+if add_to_backpack_callback is not None:
+    vtt_instance.set_add_to_backpack_callback(add_to_backpack_callback)
+    print("✅ Backpack callback connected")
+else:
+    print("❌ add_to_backpack_callback is None — Equipment tab may not have been built yet")
+vtt_instance.set_wallet_functions(get_player_gold_cp, deduct_player_gold_cp, add_player_gold_cp)
+npc_mode = NPCMode(npc_tab, lambda data: vtt_instance.create_token_from_npc(data))
+vtt_instance.npc_mode = npc_mode
+vtt_instance.npc_ai_tick()
+print("✅ VTT and NPC Mode connected, AI tick started")
+
+def get_current_character_name():
+    return name_entry.get()  # or whatever variable stores character name
+build_player_vtt_tab(player_vtt_tab, get_current_character_name)
+
 
 build_background_tab(background_tab)
 build_notes_tab(notes_tab, lambda: name_entry.get())
 build_companions_tab(pets_tab)
 
-#
 ##CHARACTER
 #
 build_feats_tab(feats_tab)
@@ -4418,7 +5333,6 @@ mid = tk.Frame(sheet_tab)
 mid.pack(fill="x", padx=10, pady=5)
 #build_utility(mid)
 build_combat_hud(mid)
-
 
 
 def build_dice_tray(parent):
@@ -4451,38 +5365,6 @@ build_dice_tray(sheet_tab)
 build_skills(mid)
 for stat in ["STR","DEX","CON","INT","WIS","CHA"]:
     on_stat_change(stat)
-player_vtt_built = False
-
-
-
-def update_mode(*_):
-    global vtt_built, player_vtt_built
-    mode = mode_var.get()
-
-    if mode == "DM":
-        notebook.add(vtt_tab, text="🗺️ VTT")
-        if not vtt_built:
-            build_vtt_tab(vtt_tab)
-            vtt_built = True
-        try:
-            notebook.hide(player_vtt_tab)
-        except:
-            pass
-
-    else:  # Player mode
-        try:
-            notebook.hide(vtt_tab)
-        except:
-            pass
-        notebook.add(player_vtt_tab, text="⚔️ Battle Map")
-        if not player_vtt_built:
-            build_player_vtt_tab(
-                player_vtt_tab,
-                lambda: name_entry.get()
-            )
-            player_vtt_built = True
-mode_var.trace_add("write", update_mode)
-
 
 #----------------------------------
 root.mainloop()
