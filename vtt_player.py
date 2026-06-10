@@ -203,8 +203,6 @@ def get_sheets_client():
             "https://www.googleapis.com/auth/drive",
         ])
     return gspread.authorize(creds)
-
-
 def pull_active_scene_from_sheet():
     """
     Pull ActiveScene info from DnD_VTT sheet.
@@ -236,7 +234,6 @@ def pull_active_scene_from_sheet():
         messagebox.showerror("Sheet Error", str(e))
         return None
 
-
 def pull_tokens_from_sheet():
     """Pull token positions from Tokens sheet."""
     try:
@@ -254,7 +251,7 @@ def pull_tokens_from_sheet():
                     "row":   int(row.get("row", 1)) - 1,
                     "type":  str(row.get("type", "player")),
                     "hp":    str(row.get("hp", "")) or None,
-                    "speed": int(row.get("speed", 6) or 6),
+                    "speed": int(row.get("speed", 6) or 60),
                 })
             except Exception:
                 continue
@@ -262,7 +259,6 @@ def pull_tokens_from_sheet():
     except Exception as e:
         messagebox.showerror("Sheet Error", str(e))
         return []
-
 
 def push_own_token_to_sheet(token, all_tokens):
     """
@@ -797,36 +793,80 @@ def build_player_vtt_tab(parent, get_char_name):
                 fill=CELL_TYPES[ctype]["color"], outline="",
                 tags=("tile_layer","mapstate_tile"))
 
-        # --- TOKEN LAYER ---
+# --- TOKEN LAYER ---
+        # Build visible cells from own token's perspective
+        own = state["own_token"]
+        visible_cells = None
+
+        if state["darkness_enabled"] and own:
+            max_r = max(
+                own.light_radius + own.dim_radius,
+                own.darkvision,
+                own.vision_range if own.vision_range > 0 else 0
+            )
+            if max_r > 0:
+                visible_cells = compute_fov(
+                    own.grid_col, own.grid_row,
+                    max_r, vtt_canvas.mapstate)
+
         for tok in state["tokens"]:
             tok.move_to(sc)
+            if tok is own:
+                continue  # always show own token
+            if tok.token_type != "player" and \
+               visible_cells is not None and \
+               (tok.grid_col, tok.grid_row) not in visible_cells:
+                # Enemy outside vision — hide it
+                vtt_canvas.itemconfig(tok.oval,     state="hidden")
+                vtt_canvas.itemconfig(tok.text,     state="hidden")
+                vtt_canvas.itemconfig(tok.move_lbl, state="hidden")
+                if tok.own_ring:
+                    vtt_canvas.itemconfig(tok.own_ring, state="hidden")
+            else:
+                # Visible — make sure it's shown
+                vtt_canvas.itemconfig(tok.oval,     state="normal")
+                vtt_canvas.itemconfig(tok.text,     state="normal")
+                if tok.own_ring:
+                    vtt_canvas.itemconfig(tok.own_ring, state="normal")
 
-        # --- DARKNESS LAYER ---
+# --- DARKNESS LAYER ---
         vtt_canvas.delete("darkness_layer")
 
         if state["darkness_enabled"]:
             own = state["own_token"]
             if own:
-                # Build bright and dim cell sets from own token only
                 bright_cells = set()
                 dim_cells    = set()
                 col, row     = own.grid_col, own.grid_row
 
-                if own.light_radius > 0:
-                    for dc in range(-own.light_radius, own.light_radius+1):
-                        for dr in range(-own.light_radius, own.light_radius+1):
-                            if max(abs(dc), abs(dr)) <= own.light_radius:
-                                bright_cells.add((col+dc, row+dr))
+                # Max radius for FOV computation
+                max_r = max(
+                    own.light_radius + own.dim_radius,
+                    own.darkvision,
+                    own.vision_range if own.vision_range > 0 else 0
+                )
 
-                if own.darkvision > 0:
-                    for dc in range(-own.darkvision, own.darkvision+1):
-                        for dr in range(-own.darkvision, own.darkvision+1):
-                            if max(abs(dc), abs(dr)) <= own.darkvision:
-                                cell = (col+dc, row+dr)
-                                if cell not in bright_cells:
-                                    dim_cells.add(cell)
+                if max_r > 0:
+                    # Compute FOV using shadowcasting — walls block light
+                    fov = compute_fov(col, row, max_r, vtt_canvas.mapstate)
 
-                # Check visible enemy tokens — add their light if visible
+                    if fov:
+                        for (fc, fr) in fov:
+                            dist = max(abs(fc - col), abs(fr - row))
+
+                            if own.light_radius > 0 and \
+                                    dist <= own.light_radius:
+                                bright_cells.add((fc, fr))
+                            elif own.dim_radius > 0 and \
+                                    dist <= own.light_radius + own.dim_radius:
+                                if (fc, fr) not in bright_cells:
+                                    dim_cells.add((fc, fr))
+                            elif own.darkvision > 0 and \
+                                    dist <= own.darkvision:
+                                if (fc, fr) not in bright_cells:
+                                    dim_cells.add((fc, fr))
+
+                # Check visible enemy tokens — add their light if in FOV
                 for tok in state["tokens"]:
                     if tok is own or tok.token_type == "player":
                         continue
@@ -835,11 +875,20 @@ def build_player_vtt_tab(parent, get_char_name):
                     vis = own.light_radius > 0 and \
                           max(abs(dx), abs(dy)) <= own.light_radius
                     if vis and tok.light_radius > 0:
-                        for dc in range(-tok.light_radius, tok.light_radius+1):
-                            for dr in range(-tok.light_radius, tok.light_radius+1):
-                                if max(abs(dc),abs(dr)) <= tok.light_radius:
-                                    bright_cells.add(
-                                        (tok.grid_col+dc, tok.grid_row+dr))
+                        efov = compute_fov(
+                            tok.grid_col, tok.grid_row,
+                            tok.light_radius, vtt_canvas.mapstate)
+                        if efov:
+                            bright_cells.update(efov)
+                    if vis and tok.dim_radius > 0:
+                        efov = compute_fov(
+                            tok.grid_col, tok.grid_row,
+                            tok.light_radius + tok.dim_radius,
+                            vtt_canvas.mapstate)
+                        if efov:
+                            for cell in efov:
+                                if cell not in bright_cells:
+                                    dim_cells.add(cell)
 
                 # Draw darkness
                 for ci in range(state["canvas_cols"]):
@@ -860,12 +909,11 @@ def build_player_vtt_tab(parent, get_char_name):
                                 fill="black", outline="",
                                 tags="darkness_layer")
             else:
-                # No own token — full darkness
+                # No own token yet — full darkness
                 vtt_canvas.create_rectangle(
                     0, 0, gw+sc*2, gh+sc*2,
                     fill="black", outline="",
                     tags="darkness_layer")
-
         # --- DRAW ORDER ---
         vtt_canvas.tag_lower("tile_layer")
         vtt_canvas.tag_lower("map_layer")
@@ -1248,3 +1296,5 @@ def build_player_vtt_tab(parent, get_char_name):
         welcome.place_forget()
 
     vtt_canvas.bind("<Button-1>", hide_welcome, add="+")
+
+
